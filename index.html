@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="format-detection" content="telephone=no">
+
+
+    <title>GWOSC</title>
+    
+    <link rel="shortcut icon" href="/static/images/icons/gwosc-fav.ico">
+    <!-- Bootstrap -->
+    <link href="/static/bootstrap/bootstrap-3.3.7-dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="/static/bootstrap/gwosc.css" rel="stylesheet">
+    <script src="/static/bootstrap/jquery.min.js"></script> 
+    <script src="/static/bootstrap/bootstrap-3.3.7-dist/js/bootstrap.min.js"></script>
+    
+   
+    <!-- Global site tag (gtag.js) - Google Analytics -->
+    <script async src="https://www.googletagmanager.com/gtag/js?id=UA-50341146-3"></script>
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      function gtag(){dataLayer.push(arguments);}
+      gtag('js', new Date());
+      gtag('config', 'UA-50341146-3');
+    </script>
+
+
+  </head>
+
+  <!-- <body  style='background-color:#F6F6FF'> -->
+
+  <body style='min-width:1000px;'  > 
+    <div class="container-fluid" style="background: #547abb; box-shadow: 0 0px 8px #555; margin: 0 0 1px 0; border-bottom: .3em solid #3d4f78;">      
+      <div class="row">
+	  <div class="col-sm-2  col-sm-offset-0" style="padding: 10px 10px;"><a href='/'>
+            <img src="/static/images/ligo_virgo_transparent_crop.png" width="100%" style="max-width:140px"/></a>
+
+	  </div>
+	  <div class="col-sm-10"  style="padding: 40px 10px;">
+	    <span style='font-size:2.0em;color:#FFF;line-height:1.2em;'>Gravitational Wave
+	      Open Science Center</span>
+	  </div>
+      </div>
+    </div>
+    
+    
+    <nav class="navbar navbar-default">
+      <div class="container-fluid">
+	<div class="navbar-header">
+	  <a class="navbar-brand" href="/">
+	    <span class="glyphicon glyphicon-home"></span>
+	  </a>
+	</div> 
+	<ul class="nav navbar-nav">
+	  <li class="dropdown">
+	    <a class="dropdown-toggle" data-toggle="dropdown" href="#">Data<span class="caret"></span></a>
+            <ul class="dropdown-menu">
+              <li><a href="/data">Strain Data</a></li>
+              <li><a href="/eventapi">Event Portal</a></li>
+              <li><a href="/timeline">Timelines</a></li>
+	      <li><a href="/auxiliary/GW170814">Auxiliary Channels</a></li> 
+	      <li><a href="/alerts">Low Latency Alerts</a></li>
+            </ul>
+
+	  <li class="dropdown">
+	    <a class="dropdown-toggle" data-toggle="dropdown" href="#">Software<span class="caret"></span></a>
+            <ul class="dropdown-menu">
+              <li><a href="/software">Software Packages</a></li>
+	      <li><a href="/tutorials">Tutorials</a></li>
+	      <li><a href="/workshops">Workshops</a></li>
+            </ul>
+
+	  <li class="dropdown">
+	    <a class="dropdown-toggle" data-toggle="dropdown" href="#">Online Tools<span class="caret"></span></a>
+            <ul class="dropdown-menu">
+	      <li><a href="/detector_status">Detector Status</a></li>
+	      <li><a href="/gps">GPS Converter</a></li>
+	      <li><a href="/interactive">Web Apps</a></li>
+              <li><a  href="/mysources">My Sources</a></li>
+
+            </ul>
+	    
+	  <li class="dropdown">
+	    <a class="dropdown-toggle" data-toggle="dropdown" href="#">About GWOSC<span class="caret"></span></a>
+            <ul class="dropdown-menu">
+              <li><a href="/links">About</a></li>
+              <li><a href="/acknowledgement">Acknowledge</a></li>
+              <li><a href="/projects">Projects</a></li>
+	      <li><a href="/contact">Contact</a></li>
+            </ul>
+	    
+	   <!--
+	  <li><a href="#">Home</a></li>
+	  <li><a href="#">Page 1</a></li>
+	  <li><a href="#">Page 2</a></li>
+	  <li><a href="#">Page 3</a></li>
+	  -->
+	   
+	</ul>
+      </div>
+    </nav>
+
+    
+<div class="container">
+
+
+  
+  <div class="row">
+    <div class="col-sm-12 col-sm-offset-0">
+   
+
+	  
+<table cellpadding="10"><tr><td>
+<a href=/timeline><h1>Timeline</h1></a>
+</td><td>
+<p>
+The vertical axis indicates the fraction of time a flag is on during each "Sample time". 
+</p>
+</td></tr></table>
+
+
+
+
+<link rel="stylesheet" type="text/css" href="/static/css/jquery.jqplot.css" />
+<style>
+.jqplot-cursor-tooltip {
+    border: 1px solid #cccccc;
+    font-size: 1.5em;
+    white-space: nowrap;
+    background: #ffffff;
+    padding: 1px;
+}
+</style>
+<script language="javascript" type="text/javascript" src="/static/js/jquery.js"></script>
+<script language="javascript" type="text/javascript" src="/static/js/jquery.jqplot.js"></script>
+<script language="javascript" type="text/javascript" src="/static/js/jqplot.json2.js"></script>
+<script language="javascript" type="text/javascript" src="/static/js/jqplot.cursor.js"></script>
+<script language="javascript" type="text/javascript" src="/static/js/gpstimeutil.js"></script>
+<script language="javascript" type="text/javascript" src="/static/js/timeline-time.js"></script>
+<script language="javascript" type="text/javascript" src="/static/js/timeline-plot.js"></script>
+
+<script language="javascript" type="text/javascript"> 
+ifoList = [];
+</script>
+
+
+<script language="javascript" type="text/javascript"> 
+ifoList.push("H1");
+</script>
+
+<script language="javascript" type="text/javascript"> 
+ifoList.push("L1");
+</script>
+
+
+<script language="javascript" type="text/javascript">
+var showTLF = new TimelineFamily(
+  'showTLF', 
+  'H1_DATA*L1_DATA',
+  'https://www.gw-osc.org/',
+  'O1', 
+  1126051217, 11203200, 
+  [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+  ['', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '']
+);
+showTLF.set(1126051217, 11203200, -1);
+</script>
+
+<style type="text/css">
+    div.jqplot-target {
+        margin: 0px;
+    }
+</style>
+
+<div id="showTLF_control" ></div>
+<!--
+<div id="redbanner">
+<font color=red><b>To zoom in, click in any panel, move horizontally, and release.</b></font>
+</div></p>
+-->
+
+
+
+
+
+<table>
+
+<tr>
+<td id="title_showTLF_H1_DATA" valign="middle" width="10%"><h2>H1_DATA</h2></td>
+<td>
+<div id="showTLF_H1_DATA" onMouseUp="event.cancelBubble=true;return false;" style="height:100px; width:700px;" ></div>
+</td>
+</tr>
+
+<tr>
+<td id="title_showTLF_L1_DATA" valign="middle" width="10%"><h2>L1_DATA</h2></td>
+<td>
+<div id="showTLF_L1_DATA" onMouseUp="event.cancelBubble=true;return false;" style="height:100px; width:700px;" ></div>
+</td>
+</tr>
+
+</table>
+</body>
+</html>
+
+<script language="javascript" type="text/javascript">
+$(document).ready(function() {
+    setEventHandlers();
+    showTLF.plotAll();
+});
+
+function fetchTLF(targetId){
+    return showTLF;
+}
+</script>
+
+
+
+
+        </div>
+      </div>
+    </div>
+
+
+    <br/><br/><br/><br/>
+
+
+
+    <footer class="page-footer" style="background:#474;" >
+      <div class="container-fluid"> 
+	<div class='row'>
+	  <div class='col-sm-12'><br/></div>
+	</div>
+	<div class='row'>  
+	  <div class='col-sm-12 text-left' >
+	    <img src="/static/images/NSF_4-Color_bitmap_Logo.png"  height='60px' style="padding:10px;">
+	    <img src="/static/images/infn_logo_nolabel.png" height='55' style="padding:10px;">
+	    <img src="/static/images/cnrs_logo.png"  height='55' style="padding:10px;">
+	    <img src="/static/images/ligologo_crop.gif" height='55' style="padding:10px;">
+	    <img src="/static/images/lsc.gif" height='55' style="padding:10px;">
+	    <img src="/static/images/ego_logo.png" height='55' style="padding:10px;">
+	    <img src="/static/images/logo-virgo-transp_bckg.png" height='55' style="padding:10px;">
+	  </div>
+	</div>
+	
+	<div class="row">
+	  <div class="col-sm-2 text-center"><a rel="license" href="http://creativecommons.org/licenses/by/4.0/"><img alt="Creative Commons License"  style="border-width:0" height='40px' src="/static/images/by.png" /></a></div>
+	  <div class="col-sm-10 text-left">
+	    <small style='color:#BBB'>Data released under a <a rel="license" href="http://creativecommons.org/licenses/by/4.0/" style="color:#FFF">CC BY 4.0 License.</a><br/> 
+	      Please follow
+	      <a href="/acknowledgement" style="color:white;">acknowledgement guidelines.</a>
+	      </small>
+
+	  </div>
+	</div>
+      
+	<div class="row">
+	  <div class="col-sm-2"><br></div>
+	</div>
+      </div>	    
+    </footer>
+    
+</body>
+</html>

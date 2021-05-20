@@ -1,3 +1,21 @@
+# Master of Data Science Research Project
+
+This repository is for the research work of Daniel Tang (21140852) for work on flow-based models for gravitational wave parameter estimation.
+
+We have forked the code written by Stephen R. Green and Jonathan Gair [arXiv:2008.03312](https://arxiv.org/abs/2008.03312) to leverage their previous work on gravitational wave generation and training a neural spline flow model.
+
+## Current Goals
+
+We have been investigating how to refactor the waveform generation code for potential run-time speedups using multi-threading (for I/O bound fetching open source data) and multi-processing (for CPU bound simluating of waveform models given samples from our priors). Additionally, we intend to rewrite a more comprehensive and reproducible training framework with PyTorch (or possibly PyTorch Lightning) to help accelerate our research.
+
+We also hope to include research from Noise Flows and Fourier Flows - however we may need to rewrite these models from scratch in PyTorch.
+- Noise Flows: https://arxiv.org/abs/1908.08453
+- Fourier Flows: https://openreview.net/forum?id=PpshD0AXfA
+
+We propose that noise modelling may be appropriate to help with denoising strain data, and fourier flows may be more suited to the data model - especially as the work done by Green and Gair work with waveform signals in the frequency domain (although it is projected to a reduced basis fit via randomized SVD).
+
+The original README detailing the work of Green and Gair is kept below for context and completeness:
+
 # Complete parameter inference for GW150914 using deep learning
 
 ## lfigw: Likelihood-Free Inference for Gravitational Waves
@@ -11,15 +29,6 @@ The aim of this work is to train a neural-network conditional density estimator 
 This is the first successful application of deep learning to perform inference over the full 15-dimensional space of quasi-circular binary black hole parameters, using real strain data from multiple detectors, and taking into account realistic noise properties. We demonstrated this by analyzing data from the first gravitational-wave detection, [GW150914](https://en.wikipedia.org/wiki/First_observation_of_gravitational_waves).
 
 This code uses the [nflows](https://github.com/bayesiains/nflows) package to implement the normalizing flow, which we take to be a [neural spline](https://arxiv.org/abs/2002.03712) flow. It makes use of the [PyTorch](https://pytorch.org) machine learning framework.
-
-## Setup
-
-Create and activate a `conda` environment with the correct software dependencies:
-
-    conda env create -f environment.yml
-    conda activate gwml
-
-## Usage
 
 ### Training
 
@@ -68,7 +77,3 @@ The resulting posterior distributions for GW150914 can be compared, and we see t
 
 ![Posterior](figures/posterior_most.jpg)
 ![Sky position](figures/skymap.jpg)
-
-## Contact
-
-For any questions or issues with the code, please contact me at stephen.green@aei.mpg.de.
