@@ -3,6 +3,7 @@ import argparse
 
 from pathlib import Path
 from typing import Union, Optional, List
+from datetime import datetime
 
 import pycbc.psd
 # from pycbc.catalog import Merger
@@ -11,8 +12,8 @@ import pycbc.psd
 from utils.config import read_ini_config
 from utils.noise import NoiseTimeline, get_tukey_window
 
-# TO DO: Better incorporate real data handling
-# DATA_DIR = '/mnt/datahole/daniel/gwosc/O1'
+# TO DO: Implement logging over print statements
+import logging
 
 # TO DO: Better incorporate gps time selection
 # gps_time = int(Merger('GW150914').time + 2 - psd_window - static_args['waveform_length'])
@@ -37,16 +38,19 @@ def generate_psd(
     # load static argument file
     _, static_args = read_ini_config(static_args_ini)
 
-    # retrieve strain data from valid windows from .hdf files
-    data_dir = Path(data_dir)
-    timeline = NoiseTimeline(data_dir, ifos)
-    strains = timeline.get_strains(gps_time, psd_window)
-
     # specify output directory
+    data_dir = Path(data_dir)
     out_dir = Path(out_dir) if out_dir is not None else data_dir
     assert not out_dir.is_file(), f"{out_dir} is a file. It should either not exist or be a directory."
     out_dir.mkdir(parents=True, exist_ok=True)
     
+    if verbose:
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] Saving {ifos} PSDs to {out_dir}/") 
+
+    # retrieve strain data from valid windows from .hdf files
+    timeline = NoiseTimeline(data_dir, ifos)
+    strains = timeline.get_strains(gps_time, psd_window)
+
     for ifo in strains:
         psd = pycbc.psd.estimate.welch(
             strains[ifo],
@@ -59,17 +63,17 @@ def generate_psd(
             )
         )
 
-        out_file = out_dir / f'{ifo}_PSD.txt'
+        out_file = out_dir / f'{ifo}_PSD.npy'
         psd.save(out_file)
 
-    if verbose:
-        print(f'Saved {list(strains.keys())} PSD .txt files to {str(out_file)}.')
+        if verbose:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] Saved {ifo} PSD to {str(out_file)}.")
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Arguments for power spectral density generation code.')
 
     parser.add_argument('-d', '--data_dir', dest='data_dir', type=str, help='The input directory to load .hdf5 strain data files.')
-    parser.add_argument('-o', '--out_dir', dest='out_dir', type=str, help='The output directory to save generated power spectral density .txt files.')
+    parser.add_argument('-o', '--out_dir', dest='out_dir', type=str, help='The output directory to save generated power spectral density .npy files.')
     parser.add_argument('-s', '--static_args', dest='static_args_ini', action='store', type=str, help='The file path of the static arguments configuration .ini file.')
     parser.add_argument('-i', '--ifos', type=str, nargs='+', default=['H1', 'L1'], help='The interferometers to project data onto - assumes extrinsic parameters are present.')
     # parser.add_argument('--overwrite', default=False, action="store_true", help="Whether to overwrite files if data_dir already exists.")

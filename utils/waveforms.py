@@ -1,7 +1,6 @@
 from typing import Union, Optional, Tuple, Dict
 
 import numpy as np
-from scipy.signal import tukey
 
 from lal import MSUN_SI#, LIGOTimeGPs
 from lalsimulation import SimInspiralTransformPrecessingNewInitialConditions

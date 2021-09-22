@@ -8,6 +8,7 @@ from typing import Optional, List
 from datetime import datetime
 
 import numpy as np
+from numpy.lib.format import open_memmap
 
 from sklearn.utils.extmath import randomized_svd
 
@@ -15,6 +16,9 @@ from pycbc.types import load_frequencyseries
 
 # local imports
 from utils.config import read_ini_config
+
+# TO DO: Implement logging over print statements
+import logging
 
 def fit_reduced_basis(
     static_args_ini: str,
@@ -44,18 +48,21 @@ def fit_reduced_basis(
     out_dir.mkdir(parents=True, exist_ok=True)
     basis_file = out_dir / file_name
     
-    n_samples = 1000
-    projections = np.memmap(
-        filename=str(data_dir / 'projections.npy'),
-        dtype=np.complex128,  # header-less .npy bytes require dtype specification
-        mode='c',  # copy-on-write: assignments affect data in memory, but changes are not saved to disk.
-        shape=(n_samples, len(ifos), int(static_args['f_final'] / static_args['delta_f']) + 1)
-    )
+    # load projections from disk as copy-on-write memory mapped array
+    projections = np.load(str(data_dir / 'projections.npy'), mmap_mode='c')
     bandpassed_frequencies = static_args['fd_length'] - int(static_args['f_lower'] / static_args['delta_f'])
     basis = np.empty((len(ifos), bandpassed_frequencies, num_basis), dtype=projections.dtype)
+    
+    basis = open_memmap(
+        filename=basis_file,
+        mode='w+',  # create or overwrite file
+        dtype=projections.dtype,
+        shape=(len(ifos), bandpassed_frequencies, num_basis),
+    )
+
     for i, ifo in enumerate(ifos):
         if verbose:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] Fitting {ifo} reduced basis...")
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] Fitting randomized SVD for {ifo} with {num_basis} reduced elements.")
             start = time.perf_counter()
 
         # get projected waveform data
@@ -63,7 +70,7 @@ def fit_reduced_basis(
 
         # whiten data
         if whiten:
-            psd_file = Path(psd_dir) / f'{ifo}_PSD.txt'
+            psd_file = Path(psd_dir) / f'{ifo}_PSD.npy'
             assert psd_file.is_file(), f"{psd_file} does not exist."
             psd = load_frequencyseries(psd_file)
             data /= psd[:static_args['fd_length']] ** 0.5
@@ -73,17 +80,12 @@ def fit_reduced_basis(
             data = data[:, int(static_args['f_lower'] / static_args['delta_f']):]
 
         # reduced basis for projected waveforms
-        U, s, Vh = randomized_svd(data, num_basis)
-        basis[i] = Vh.T.conj()
+        _, _, Vh = randomized_svd(data, num_basis)
+        basis[i, :, :] = Vh.T.conj()  # write to memmap array
 
         if verbose:
             end = time.perf_counter()
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] Finished {ifo} in {round(end-start,4)}s")
-            
-    # swap (ifo, batch) --> (batch, ifo)
-    # basis = basis.swapaxes(0, 1)
-    np.save(basis_file, basis)  # .astype(np.complex64)
-
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] Finished {ifo} in {round(end-start, 4)}s.")
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Arguments for randomized SVD fitting code.')
