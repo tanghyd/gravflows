@@ -134,7 +134,6 @@ async def download_strain(
     id: Optional[str]=None,
     buffer_size: Optional[int]=None,
 ) -> None:
-    # TO DO: investigate aiofiles https://stackoverflow.com/q/57578794/15808586
     name = f'Writer {id}' if type(id) in [int, str] else 'Writer'  # for logger
     filepath = get_filepath_from_metadata(directory, strain_metadata)
 
