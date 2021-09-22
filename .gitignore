@@ -2,5 +2,5 @@
 datasets
 
 # normalizing flows
-gravflows
-utils/pytorch
+gravflows/
+utils/pytorch.py
