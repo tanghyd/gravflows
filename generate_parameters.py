@@ -73,8 +73,8 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Arguments for parameter generation code.')
 
     parser.add_argument('-n', type=int, help="Number of parameter samples to generate.")
-    parser.add_argument('-d, --data_dir', default='data', dest='data_dir', type=str, help='The output directory to save generated waveform files.')
-    parser.add_argument('-f, --file_name', default='parameters.csv', dest='file_name', type=str, help='The output .csv file name to save the generated parameters.')
+    parser.add_argument('-d', '--data_dir', default='data', dest='data_dir', type=str, help='The output directory to save generated waveform files.')
+    parser.add_argument('-f', '--file_name', default='parameters.csv', dest='file_name', type=str, help='The output .csv file name to save the generated parameters.')
     parser.add_argument('--overwrite', default=False, action="store_true", help="Whether to overwrite files if data_dir already exists.")
     parser.add_argument('--metadata', default=False, action="store_true", help="Whether to copy config file metadata to data_dir with parameters.")
     parser.add_argument(

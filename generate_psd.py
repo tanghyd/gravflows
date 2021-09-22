@@ -68,8 +68,8 @@ def generate_psd(
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Arguments for power spectral density generation code.')
 
-    parser.add_argument('-d, --data_dir', dest='data_dir', type=str, help='The input directory to load .hdf5 strain data files.')
-    parser.add_argument('-o, --out_dir', dest='out_dir', type=str, help='The output directory to save generated power spectral density .txt files.')
+    parser.add_argument('-d', '--data_dir', dest='data_dir', type=str, help='The input directory to load .hdf5 strain data files.')
+    parser.add_argument('-o', '--out_dir', dest='out_dir', type=str, help='The output directory to save generated power spectral density .txt files.')
     parser.add_argument('-s', '--static_args', dest='static_args_ini', action='store', type=str, help='The file path of the static arguments configuration .ini file.')
     parser.add_argument('-i', '--ifos', type=str, nargs='+', default=['H1', 'L1'], help='The interferometers to project data onto - assumes extrinsic parameters are present.')
     # parser.add_argument('--overwrite', default=False, action="store_true", help="Whether to overwrite files if data_dir already exists.")

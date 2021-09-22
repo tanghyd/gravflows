@@ -1,4 +1,5 @@
 import os
+import traceback
 import json
 import datetime
 
@@ -33,13 +34,13 @@ from gravflows.utils.strain import get_standardization_factor
 from gravflows.utils.pytorch import StrainDataset, BasisDataset
 
 
-def setup(rank, world_size):
+def setup_nccl(rank, world_size):
     # os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
     os.environ['MASTER_ADDR'] = 'localhost'
     os.environ['MASTER_PORT'] = str(12355)
     distributed.init_process_group("nccl", rank=rank, world_size=world_size, timeout=datetime.timedelta(0, 180))
 
-def cleanup():
+def cleanup_nccl():
     distributed.destroy_process_group()
 
 def sample_flow(
@@ -47,7 +48,6 @@ def sample_flow(
     nsamples: int=50000,
     context: Optional[Union[np.ndarray, torch.Tensor]]=None,
     batch_size: int=512,
-    device: Optional[Union[str, torch.device]]=None,
     output_device: Union[str, torch.device]='cpu',
     inference_mode: bool=True,
 ):
@@ -90,52 +90,76 @@ def sample_flow(
             return samples[0]
         return samples
 
-# Training with PyTorch native DataDistributedParallel (DDP)
-def train_distributed(rank: int, world_size: int=1, epochs: int=200, verbose: bool=False):
+def generate_figures(queue: mp.Queue, tb: SummaryWriter):
+    # to do - better handle latex for figure formatting
+    param_labels = get_parameter_latex_labels()
+    labels = [
+        param_labels[param] for param in [
+        'mass_1', 'mass_2', 'phase', 'a_1', 'a_2',
+        'tilt_1', 'tilt_2', 'phi_12', 'phi_jl', 'theta_jn',
+        'psi', 'ra', 'dec', 'time', 'distance']
+    ]
     
-    # train function is run on each gpu with a local rank
-    setup(rank, world_size)  # world size is total gpus
-    torch.cuda.set_device(rank)
+    while True:
+        try:
+            (samples, ground_truths, epoch) = queue.get()
+            
+            fig = corner.corner(
+                samples,
+                levels=[0.5, 0.9],
+                scale_hist=True,
+                plot_datapoints=False,
+                labels=labels,
+                show_titles=True,
+                fontsize=18,
+                truths=ground_truths[0].numpy()
+            #     range=corner_range,
+            )
 
-    # specify path for strain .hdf5 files for background noise
-    # data_dir = Path('/mnt/datahole/daniel/gwosc/O1')
+            fig.suptitle('Neural Spline Flow Posteriors', fontsize=22)
+            fig.tight_layout()
+            tb.add_figure('corner', fig, epoch)
+        except Exception as e:
+            traceback.print_exc()
 
+
+# Training with PyTorch native DataDistributedParallel (DDP)
+def train_distributed(
+    rank: int,
+    world_size: int,
+    lr: float=0.0002,
+    epochs: int=500,
+    interval: int=100,
+    verbose: bool=False,
+):
+    assert epochs > interval > 0, "Interval must be a positive integer between 0 and epochs."
+
+    # setup data distributed parallel training
+    setup_nccl(rank, world_size)  # world size is total gpus
+    torch.cuda.set_device(rank)  # rank is gpu index
+    device = torch.device('cuda')
+
+    # visualisation setup
+    if rank == 0:  
+        tb = SummaryWriter()  # tensorboard
+
+        # setup asynchronous figure generation worker process
+        queue = mp.SimpleQueue()
+        figure_writer = mp.Process(target=generate_figures, args=(queue, tb))
+        figure_writer.start()
+    
     # repository for pre-generated waveform data
     waveform_dir = Path('/mnt/datahole/daniel/gravflows/complex128_4s_centered')
     with (waveform_dir / 'static_args.json').open('r') as arg_file:
         static_args = json.load(arg_file)
         
-    # train set should be renamed to reduced basis set - change this!
-    train_dir = Path('/mnt/datahole/daniel/gravflows/train')
-    basis_dir = train_dir / 'reduced_basis'
-
     save_dir = Path('model_weights/')
     experiment_dir = save_dir / datetime.datetime.now().strftime("%Y-%m-%d_%H:%M:%S")
     # experiment_dir = save_dir / '2021-09-09_01:49:21'
     experiment_dir.mkdir(exist_ok=True)
 
-    # tensorboard
-    if rank == 0:  tb = SummaryWriter()
-
-    device = torch.device('cuda')
-    n = 200  # basis truncation
+    n = 200  # number of reduced basis elements
     batch_size = 2000
-    
-    # load reduced basis (V matrix as complex64)
-    # basis_files = ('H1', 'L1')
-
-    # get  reduced basis standardization factor
-    # reduced_basis = {
-    #     ref: np.load(basis_dir / f'{ref}_bandpassed_basis.npy')[:, :n]
-    #     for ref in basis_files
-    # }
-
-    # standardization = torch.from_numpy(
-    #     np.stack([
-    #         get_standardization_factor(reduced_basis[ref], static_args)
-    #         for ref in reduced_basis
-    #     ])
-    # ).to(device)
 
     dataset = BasisDataset(
         waveform_dir,
@@ -174,9 +198,6 @@ def train_distributed(rank: int, world_size: int=1, epochs: int=200, verbose: bo
         **ExtrinsicsGenerator.distribution.bounds,
     }
 
-    param_labels = get_parameter_latex_labels()
-    labels = [param_labels[param] for param in dataset.parameters.columns]
-
     # [2, 15] tensor (0: mean; 1: std)
     parameter_stats = (
         torch.from_numpy(compute_parameter_statistics(prior_bounds).values)
@@ -197,21 +218,7 @@ def train_distributed(rank: int, world_size: int=1, epochs: int=200, verbose: bo
     # sync_bn_flow = nn.SyncBatchNorm.convert_sync_batchnorm(flow, process_group=None)
 
     flow = DDP(flow.to(rank), device_ids=[rank], output_device=rank)
-    optimizer = torch.optim.Adam(flow.parameters(), lr=0.0002)
-
-    flow.module.load_state_dict(
-        torch.load(
-            save_dir / '2021-09-20_00:18:41' / 'flow_1000.pt',
-            map_location=device
-        )
-    )
-
-    optimizer.load_state_dict(
-        torch.load(
-            save_dir / '2021-09-20_00:18:41' / 'optimizer_1000.pt',
-            map_location=device
-        )
-    )
+    optimizer = torch.optim.Adam(flow.parameters(), lr=lr)
 
     # tqdm progress bar
     disable = True
@@ -222,9 +229,8 @@ def train_distributed(rank: int, world_size: int=1, epochs: int=200, verbose: bo
     # train
     flow.train()
     train_loss = torch.zeros((1,), device=device, requires_grad=False)
-    init_epoch = 300
     with tqdm(total=len(dataloader)*epochs, desc='Training Neural Spline Flow', disable=disable) as loop:
-        for epoch in range(1+init_epoch, 1+init_epoch+epochs):
+        for epoch in range(1, 1+epochs):
             if rank == 0: loop.set_postfix({'epoch': epoch})
             iterator = iter(dataloader)
             basis, parameters = next(iterator) 
@@ -274,42 +280,28 @@ def train_distributed(rank: int, world_size: int=1, epochs: int=200, verbose: bo
                 tb.add_scalar(f'loss', loss.item(), epoch)
                 tb.flush()
 
-            if (epoch % 100 == 0):
+            if (interval != 0) and (epoch % interval == 0):
                 # validation
                 n_samples = 50000
                 world_samples = [
-                    torch.empty((n_samples // world_size, 15), dtype=torch.float32, device=device)
-                    for _ in range(world_size)
+                    torch.empty(
+                        (n_samples // world_size, 15),
+                        dtype=torch.float32,
+                        device=device
+                    ) for _ in range(world_size)
                 ]
 
-                samples = sample_flow(flow, n_samples, test_context[0])
+                # generate samples for corner plots etc.
+                samples = sample_flow(flow, n_samples, device=rank)
                 distributed.all_gather(world_samples, samples)
                 world_samples = world_samples.cpu()
 
                 if rank == 0:
+                    # send samples to async process to generate matplotlib figures
                     samples = (samples - parameter_stats[None, :, 0]) / samples[None, :, 1]
                     ground_truths = (parameters * parameter_stats[None, :, 1]) + parameter_stats[None, :, 0]
+                    queue.put((tb, world_samples, ground_truths, epoch))
                 
-                    fig = corner.corner(
-                        world_samples,
-                        levels=[0.5, 0.9],
-                        scale_hist=True,
-                        plot_datapoints=False,
-                        labels=labels,
-                        show_titles=True,
-                        fontsize=18,
-                        truths=ground_truths[0].numpy()
-                    #     range=corner_range,
-                    )
-
-                    fig.suptitle('Neural Spline Flow Posteriors', fontsize=22)
-                    fig.tight_layout()
-                    tb.add_figure('corner', fig, epoch)
-
-                world_loss = [torch.ones_like(train_loss) for _ in range(world_size)]
-                distributed.all_gather(world_loss, train_loss)
-
-                if rank == 0:
                     # save checkpoint and write computationally expensive data to tb
                     torch.save(flow.module.state_dict(), experiment_dir / f'flow_{epoch}.pt')
                     torch.save(optimizer.state_dict(), experiment_dir / f'optimizer_{epoch}.pt')
@@ -317,12 +309,13 @@ def train_distributed(rank: int, world_size: int=1, epochs: int=200, verbose: bo
 
             distributed.barrier()
 
-        cleanup()  # destroy processes from distributed training
+        cleanup_nccl()  # destroy processes from distributed training
 
 if __name__ == '__main__':
     parser = ArgumentParser()
-    parser.add_argument('--epochs', type=int, default=200)
     parser.add_argument('--num_gpus', type=int, default=1)
+    parser.add_argument('--epochs', type=int, default=10)
+    parser.add_argument('--interval', type=int, default=2)
     parser.add_argument('--verbose', default=False, action="store_true")
     args = parser.parse_args()
 

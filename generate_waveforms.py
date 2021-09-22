@@ -176,11 +176,11 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Arguments for waveform generation code.')
 
     # configuration files
-    parser.add_argument('-d, --data_dir', dest='data_dir', type=str, help='The input directory to load parameter files.')
-    parser.add_argument('-o, --out_dir', dest='out_dir', type=str, help='The output directory to save generated waveform files.')
+    parser.add_argument('-d', '--data_dir', dest='data_dir', type=str, help='The input directory to load parameter files.')
+    parser.add_argument('-o', '--out_dir', dest='out_dir', type=str, help='The output directory to save generated waveform files.')
     parser.add_argument('-s', '--static_args', dest='static_args_ini', action='store', type=str, help='The file path of the static arguments configuration .ini file.')
-    parser.add_argument('-p, --params_file', dest='params_file', default='parameters.csv', type=str, help='The input .csv file of generated parameters to load.')
-    parser.add_argument('-f, --file_name', dest='file_name', default='waveforms.npy', type=str, help='The output .npy file name to save the generated parameters.')
+    parser.add_argument('-p', '--params_file', dest='params_file', default='parameters.csv', type=str, help='The input .csv file of generated parameters to load.')
+    parser.add_argument('-f', '--file_name', dest='file_name', default='waveforms.npy', type=str, help='The output .npy file name to save the generated parameters.')
 
     parser.add_argument('--overwrite', default=False, action="store_true", help="Whether to overwrite files if data_dir already exists.")
     parser.add_argument('--metadata', default=False, action="store_true", help="Whether to copy config file metadata to data_dir with parameters.")
@@ -190,7 +190,7 @@ if __name__ == '__main__':
     parser.add_argument('-v', '--verbose', default=False, action="store_true", help="Sets verbose mode to display progress bars.")
 
     # multiprocessing
-    parser.add_argument('--workers', type=int, default=1, help='The number of workers to use for Python multiprocessing.')
+    parser.add_argument('-w', '--workers', type=int, default=1, help='The number of workers to use for Python multiprocessing.')
     
     # # generation
     
