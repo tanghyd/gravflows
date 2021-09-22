@@ -1,6 +1,8 @@
 # While this code works effectively, CVMFS distributed file system may be better.
 # Below is a response from Jonah Kanner about best practices for data download from GWOSC.
 
+### EMAIL
+
 # Hi Daniel,
 
 # Thanks for reaching out.
@@ -8,7 +10,8 @@
 # In general, for large file downloads, we recommend using CVMFS:
 # https://www.gw-openscience.org/cvmfs/ https://computing.docs.ligo.org/guide/cvmfs/
 
-# The CVMFS system should be pretty robust, and should handle requests for large amounts of data well. I would encourage you to try it before building an in-house system.
+# The CVMFS system should be pretty robust, and should handle requests for large amounts of data well.
+# I would encourage you to try it before building an in-house system.
 
 # To instead download directly from our sever, we ask that you limit the rate of requests.
 # We haven't tested this extensively, but we do know that high rates of requests can bog down the server.
@@ -18,6 +21,21 @@
 
 # Thank you for your help. Good luck with your project!
 # Best, Jonah Kanner
+
+### INFO ON RUNNING SCRIPT
+
+# dataset needs to be specified (i.e. O1, O1_16KHz, O2) etc
+# 4KHz data should download much quicker than 16KHz (as expected)
+# if dataset is changed between observing runs
+# the gps times also need to be edited as well.
+
+# nohup can be used for asynchronous data download in background
+# bash command:
+# python async_download.py \
+# --queue_rate 0.1 \
+# --ncon 10 \
+# --buffer_size 4096 \
+# --dir /mnt/datahole/daniel/gwosc  # replace with desired directory
 
 import os
 import json
@@ -324,12 +342,3 @@ if __name__ == "__main__":
     elapsed = datetime.timedelta(seconds=time.perf_counter() - start)
     logger.debug(f"Arguments: {args.__dict__}")
     logger.debug(f"Program completed in {elapsed}.")
-
-
-    # nohup can be used for asynchronous data download in background
-    # bash command:
-    # python async_download.py \
-    # --queue_rate 0.1 \
-    # --ncon 10 \
-    # --buffer_size 4096 \
-    # --dir /mnt/datahole/daniel/gwosc
