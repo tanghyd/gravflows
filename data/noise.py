@@ -224,7 +224,7 @@ def get_strain_from_hdf_files(
     assert (original_sampling_rate % target_sampling_rate) == 0, (
         'Invalid target_sampling_rate: Not a divisor of original_sampling_rate!'
     )
-    
+
     # Compute the resampling factor
     sampling_factor = int(original_sampling_rate / target_sampling_rate)
 
@@ -639,3 +639,17 @@ class NoiseTimeline:
             target_sampling_rate=target_sampling_rate,
             as_pycbc_timeseries=as_pycbc_timeseries
         )
+
+
+def chunk_counter(n_entries, n_chunks, chunk_size, window):
+    """Utility function to yield (start, end) indices for chunked array windowing.
+    
+    To Do: Multiprocessing for noise timeline ?
+    """
+    for i in range(n_chunks):
+        start = i*chunk_size
+        if i == n_chunks-1:
+            end = start + (n_entries-window+1) - (i*chunk_size)
+        else:
+            end = (i+1)*chunk_size
+        yield start, end
