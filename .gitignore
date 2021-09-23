@@ -7,5 +7,5 @@ __pycache__/
 .ipynb_checkpoints
 
 # normalizing flows
-gravflows/reduced_basis.py
+flows/reduced_basis.py
 data/pytorch.py
