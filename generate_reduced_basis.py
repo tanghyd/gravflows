@@ -1,6 +1,5 @@
-import os
 import argparse
-import logging
+import json
 import time
 
 from pathlib import Path
@@ -17,20 +16,19 @@ from data.config import read_ini_config
 from data.noise import load_psd_from_file
 
 # TO DO: Implement logging over print statements
-import logging
+# import logging
 
 def fit_reduced_basis(
     static_args_ini: str,
     num_basis: int=1000,
     data_dir: str='data',
-    psd_dir: str='data/PSD',
     out_dir: Optional[str]=None,
     file_name: str='reduced_basis.npy',
     ifos: List[str]=['H1', 'L1'],
-    whiten: bool=True,
-    bandpass: bool=True,
     overwrite: bool=False,
     verbose: bool=True,
+    validate: bool=False,
+    cuda: bool=False,
 ):
     # load static argument file
     _, static_args = read_ini_config(static_args_ini)
@@ -49,7 +47,8 @@ def fit_reduced_basis(
     
     # load projections from disk as copy-on-write memory mapped array
     projections = np.load(str(data_dir / 'projections.npy'), mmap_mode='c')  # copy-on-write
-    # n_bandpassed_frequencies = static_args['fd_length'] - int(static_args['f_lower'] / static_args['delta_f'])
+
+    # create memmap array to write basis to disk
     basis = open_memmap(
         filename=basis_file,
         mode='w+',  # create or overwrite file
@@ -65,18 +64,6 @@ def fit_reduced_basis(
         # get projected waveform data
         data = projections[:, i, :]
 
-        # whiten data - need to whiten assuming gaussian data if PSD not provided?
-        if whiten:
-            psd_file = Path(psd_dir) / f'{ifo}_PSD.npy'
-            assert psd_file.is_file(), f"{psd_file} does not exist."
-            psd = load_psd_from_file(psd_file)
-            data /= psd[:static_args['fd_length']] ** 0.5
-    
-        if bandpass:
-            # filter out values less than f_lower (e.g. 20Hz)
-            data[:, :int(static_args['f_lower'] / static_args['delta_f'])] = 0.  # set to zero approach
-            # data = data[:, int(static_args['f_lower'] / static_args['delta_f']):]  # array truncation approach
-
         # reduced basis for projected waveforms
         _, _, Vh = randomized_svd(data, num_basis)
         basis[i, :, :] = Vh.T.conj()  # write to memmap array
@@ -84,6 +71,20 @@ def fit_reduced_basis(
         if verbose:
             end = time.perf_counter()
             print(f"[{datetime.now().strftime('%H:%M:%S')}] Finished {ifo} in {round(end-start, 4)}s.")
+
+        if validate:
+            validation_file = out_dir / f'{ifo}_reconstruction.csv'
+            if cuda:
+                from basis.pytorch import evaluate_basis_reconstruction
+                # GPU matrix multiplication is fast enough to try multiple basis truncations
+                statistics = evaluate_basis_reconstruction(data, Vh.T.conj(), cuda, n=list(range(100, num_basis+1, 100)))
+            else:
+                from basis import evaluate_basis_reconstruction
+                statistics = evaluate_basis_reconstruction(data, Vh.T.conj(), n=list(range(100, num_basis+1, 100)))
+            
+            # to do: consider better approach to store statistical results
+            statistics.to_csv(validation_file, index=False)
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Arguments for randomized SVD fitting code.')
@@ -100,18 +101,15 @@ if __name__ == '__main__':
     parser.add_argument('-f', '--file_name', default='parameters.csv', dest='file_name', type=str, help='The output .csv file name to save the generated parameters.')
     parser.add_argument('--overwrite', default=False, action="store_true", help="Whether to overwrite files if they already exists.")
 
-    # signal processing
-    parser.add_argument('--whiten', default=False, action="store_true", help="Whether to whiten the data with the provided PSD before fitting a reduced basis.")
-    parser.add_argument('--bandpass', default=False, action="store_true", help="Whether to truncate the frequency domain data below 'f_lower' specified in the static args.")
-
-    # validation
-
     # random seed
     # parser.add_argument('--seed', type=int")  # to do
     # parser.add_argument("-l", "--logging", default="INFO", choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'], help="Set the logging level")
-    parser.add_argument('-v', '--verbose', default=False, action="store_true", help="Sets verbose mode to display progress bars.")
-    # parser.add_argument('--validate', default=False, action="store_true", help='Whether to validate a sample of the data to check for correctness.')
+    parser.add_argument('-v', '--verbose', dest='verbose', default=False, action="store_true", help="Sets verbose mode to display progress bars.")
+
+    # validation
+    parser.add_argument('--cuda', default=False, action="store_true", help="Whether to use the PyTorch CUDA implementation to evaluate basis reconstruction error.")
+    parser.add_argument('--validate', default=False, action="store_true", help='Whether to validate a sample of the data to check for correctness.')
 
     args = parser.parse_args()
-    
+
     fit_reduced_basis(**args.__dict__)

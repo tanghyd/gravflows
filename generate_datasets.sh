@@ -5,13 +5,13 @@
 # # env DATASET_DIR=/fred/oz016/datasets/ bash generate_datasets.sh
 # # then we set it to be a default path
 
-# dataset_dir=${DATASET_DIR:-"/mnt/datahole/daniel/gravflows/datasets"}
-dataset_dir=${DATASET_DIR:-"datasets"}
+dataset_dir=${DATASET_DIR:-"/mnt/datahole/daniel/gravflows/datasets"}
+# dataset_dir=${DATASET_DIR:-"datasets"}
 echo "Saving datasets to ${dataset_dir}/" 
 
 # training data set
 python generate_parameters.py \
-    -n 10000 \
+    -n 100000 \
     -d "${dataset_dir}/train/" \
     -c config_files/intrinsics.ini \
     --overwrite \
@@ -19,7 +19,7 @@ python generate_parameters.py \
 
 # reduced basis data set
 python generate_parameters.py \
-    -n 5000 \
+    -n 50000 \
     -d "${dataset_dir}/basis/" \
     -c config_files/intrinsics.ini \
     -c config_files/extrinsics.ini \
@@ -93,6 +93,7 @@ do
             
         # fit reduced basis with randomized SVD
         python generate_reduced_basis.py \
+            -n 1000 \
             -d "${dataset_dir}/${partition}/" \
             -p "${dataset_dir}/${partition}/PSD" \
             -s config_files/static_args.ini \
@@ -102,8 +103,8 @@ do
             --whiten \
             --overwrite \
             --verbose \
-
-        
+            --validate \
+            --cuda 
     else
         # validation and test waveforms are noisy
         python generate_waveforms.py \
@@ -111,6 +112,8 @@ do
             -s config_files/static_args.ini \
             --psd_dir "${dataset_dir}/${partition}/PSD/" \
             --add_noise \
+            --bandpass \
+            --whiten \
             --projections_only \
             --overwrite \
             --verbose \

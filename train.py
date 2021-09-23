@@ -314,6 +314,7 @@ if __name__ == '__main__':
     parser.add_argument('--num_gpus', type=int, default=1)
     parser.add_argument('--epochs', type=int, default=10)
     parser.add_argument('--interval', type=int, default=2)
+    parser.add_argument('--project', default=False, action="store_true")
     parser.add_argument('--verbose', default=False, action="store_true")
     args = parser.parse_args()
 

@@ -138,6 +138,8 @@ def generate_waveform_dataset(
     ifos: Optional[List[str]]=None,
     add_noise: bool=False,
     psd_dir: Optional[str]=None,
+    whiten: bool=True,
+    bandpass: bool=True,
     projections_only: bool=False,
     overwrite: bool=False,
     metadata: bool=True,
@@ -210,15 +212,14 @@ def generate_waveform_dataset(
             delta_f=static_args['delta_f']
         )
 
-        # load PSD files for coloured noise generation
-        if add_noise and psd_dir is not None:
+        # load PSD files for noise generation or whitening
+        if psd_dir is not None:
             psds = {}
             for ifo in ifos:
                 # coloured noise from psd
                 psd_file = Path(psd_dir) / f'{ifo}_PSD.npy'
                 assert psd_file.is_file(), f"{psd_file} does not exist."
                 psds[ifo] = load_psd_from_file(psd_file)
-
 
         # https://numpy.org/devdocs/reference/generated/numpy.lib.format.open_memmap.html#numpy.lib.format.open_memmap
         projection_memmap = open_memmap(
@@ -290,20 +291,28 @@ def generate_waveform_dataset(
                     
                     for i, ifo in enumerate(ifos):
                         # batch project for each detector
-                        projections[:, i, :] = batch_project(detectors[ifo], samples, waveforms, static_args, sample_frequencies)
+                        projection = batch_project(detectors[ifo], samples, waveforms, static_args, sample_frequencies)
                         
                         if add_noise:
                             if psd_dir is None:
                                 # gaussian white noise in frequency domain
                                 size = (end-start, static_args['fd_length'])  # gaussian for each batch for each freq bin
-                                noise = np.random.normal(0., 1., size) + 1j*np.random.normal(0., 1., size)
-                                noise = noise.astype(dtype)
+                                noise = (np.random.normal(0., 1., size) + 1j*np.random.normal(0., 1., size)).astype(dtype)
                             else:
                                 # coloured noise from psd -- cut to fd_length (bandpass filter for higher frequencies)
                                 noise = frequency_noise_from_psd(psds[ifo], n=end-start)[:, :static_args['fd_length']]
                             
-                            projections[:, i, :] += noise
-                    
+                            projection += noise
+                        
+                        if bandpass:
+                            # filter out values less than f_lower (e.g. 20Hz) - to do: check truncation vs. zeroing
+                            projection[:, :int(static_args['f_lower'] / static_args['delta_f'])] = 0.0
+
+                        if whiten:
+                            projection /= psds[ifo][:static_args['fd_length']] ** 0.5
+                            
+                        projections[:, i, :] = projection
+
                     projection_memmap[start:end, :, :] = projections 
 
                 if not projections_only:
@@ -336,8 +345,12 @@ if __name__ == '__main__':
     parser.add_argument('--projections_only', default=False, action="store_true", help="Whether to only save projections.npy files and ignore intrinsic waveforms.npy.")
     # to do: add functionality to save noise so we can reconstruct original waveform in visualisations, training, etc.
 
+    # signal processing
+    parser.add_argument('--whiten', default=False, action="store_true", help="Whether to whiten the data with the provided PSD before fitting a reduced basis.")
+    parser.add_argument('--bandpass', default=False, action="store_true", help="Whether to truncate the frequency domain data below 'f_lower' specified in the static args.")
+
     # logging
-    parser.add_argument("-l", "--logging", default="INFO", choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'], help="Set the logging level")
+    # parser.add_argument("-l", "--logging", default="INFO", choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'], help="Set the logging level")
     parser.add_argument('-v', '--verbose', default=False, action="store_true", help="Sets verbose mode to display progress bars.")
     parser.add_argument('--validate', default=False, action="store_true", help='Whether to validate a sample of the data to check for correctness.')
 
@@ -348,16 +361,14 @@ if __name__ == '__main__':
     # # generation
     # parser.add_argument('--seed', type=int, help="Random seed.")  # to do
 
-
-
     args = parser.parse_args()
-    logging.basicConfig(
-        format='%(process)d-%(levelname)s-%(message)s',
-        level=getattr(logging, args.logging)
-    )
+    # logging.basicConfig(
+    #     format='%(process)d-%(levelname)s-%(message)s',
+    #     level=getattr(logging, args.logging)
+    # )
     
     # if args.workers == -1: args.workers = multiprocessing.cpu_count()
     assert 1 <= args.workers <= multiprocessing.cpu_count(), f"{args.workers} workers are not available."
 
-    kwargs = {key: val for key, val in args.__dict__.items() if key not in 'logging'}
-    generate_waveform_dataset(**kwargs)
+    # kwargs = {key: val for key, val in args.__dict__.items() if key not in 'logging'}
+    generate_waveform_dataset(**args.__dict__)
