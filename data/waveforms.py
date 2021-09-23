@@ -221,6 +221,12 @@ def generate_intrinsic_waveform(
             approximant=static_args['approximant'],
             distance=distance,
         )
+
+        # time shift - should we do this when we create or project the waveform?
+        hp = hp.cyclic_time_shift(static_args['seconds_before_event'])
+        hc = hc.cyclic_time_shift(static_args['seconds_before_event'])
+        hp.start_time += static_args['seconds_before_event']
+        hc.start_time += static_args['seconds_before_event']
         
         if downcast:
             hp = hp.astype(np.complex64)
@@ -278,10 +284,9 @@ def project_onto_detector(
         else:
             return h
 
-def get_sample_frequencies(f_lower: float=0, f_final: float=1024, delta_f: float=0.25) -> np.ndarray:
+def get_sample_frequencies(f_lower: float=0, f_final: float=1024, delta_f: float=0.125) -> np.ndarray:
     """Utility function to construct sample frequency bins for frequency domain data."""
-    num = int((f_final - f_lower) / delta_f)
-    return np.linspace(f_lower, f_final, num + 1)
+    return np.linspace(f_lower, f_final, int((f_final - f_lower) / delta_f) + 1)
 
 def batch_project(
     detector: Detector,
@@ -290,6 +295,7 @@ def batch_project(
     static_args: Dict[str, Union[str,float]],
     sample_frequencies: Optional[np.ndarray]=None,
 ):
+    # get frequency bins (we handle numpy arrays rather than PyCBC arrays with .sample_frequencies attributes)
     if sample_frequencies is None:
         sample_frequencies = get_sample_frequencies(
             f_final=static_args['f_final'],
@@ -301,11 +307,13 @@ def batch_project(
     assert waveforms.shape[1] == 2, "2nd dim in waveforms must be plus and cross polarizations."
     assert waveforms.shape[0] == len(extrinsics), "waveform batch and extrinsics length must match."
     
+    # calculate antenna pattern given arrays of extrinsic parameters
     fp, fc = detector.antenna_pattern(
         extrinsics['ra'], extrinsics['dec'], extrinsics['psi'],
         static_args.get('ref_time', 0.)
     )
 
+    # batch project
     projections = fp[:, None]*waveforms[:, 0, :] + fc[:, None]*waveforms[:, 1, :]
 
     # scale waveform amplitude according to ratio to reference distance
@@ -314,12 +322,8 @@ def batch_project(
 
     # Calculate time shift at detector and add to geocentric time
     dt = extrinsics['time'] - static_args.get('ref_time', 0.)  # default ref t_c = 0
-    dt += (static_args['sample_length'] / 2)  # put event at centre of window
-    dt += detector.time_delay_from_earth_center(
-        extrinsics['ra'], extrinsics['dec'], static_args.get('ref_time', 0.)
-    )
+    dt += detector.time_delay_from_earth_center(extrinsics['ra'], extrinsics['dec'], static_args.get('ref_time', 0.))
     dt = dt.astype(match_precision(sample_frequencies, real=True))
-
     time_shift = np.exp(- 2j * np.pi * dt[:, None] * sample_frequencies[None, :])
     projections *= time_shift
 

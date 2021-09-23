@@ -50,52 +50,79 @@ python generate_waveforms.py \
     -s config_files/static_args.ini \
     --overwrite \
     --verbose \
+    --validate \
     --metadata \
     --chunk_size 5000 \
     --workers 12
 
-# generate PSD files
+# generate PSD files once
 psd_out_dir="${dataset_dir}/train/PSD/" 
 python generate_psd.py \
     -d /mnt/datahole/daniel/gwosc/O1 \
     -s config_files/static_args.ini \
     -o "${psd_out_dir}" \
-    --verbose
+    --verbose \
+    --validate
     
 # project waveforms for validation and test
 for partition in "basis" "validation" "test"
 do
-    python generate_waveforms.py \
-        -d "${dataset_dir}/${partition}/" \
-        -s config_files/static_args.ini \
-        --overwrite \
-        --verbose \
-        --metadata \
-        --projections_only \
-        --ifos "H1" "L1" \
-        --chunk_size 5000 \
-        --workers 12
 
-        
     # copy PSD files to other dataset partitions for completeness
     for ifo in "H1" "L1"
     do
-        psd_out_dir="${dataset_dir}/${partition}/PSD/"
-        mkdir -p "${psd_out_dir}"
-        cp "${dataset_dir}/train/PSD/${ifo}_PSD.npy" "${psd_out_dir}"
+        # psd_out_dir="${dataset_dir}/${partition}"
+        # mkdir -p "${psd_out_dir}"
+        cp -r "${dataset_dir}/train/PSD" "${dataset_dir}/${partition}"
     done
+
+    if [[ "${partition}" == "basis" ]]; then
+        # generate clean waveforms for reduced basis
+        python generate_waveforms.py \
+            -d "${dataset_dir}/${partition}/" \
+            -s config_files/static_args.ini \
+            --psd_dir "${dataset_dir}/${partition}/PSD/" \
+            --projections_only \
+            --ifos "H1" "L1" \
+            --overwrite \
+            --verbose \
+            --validate \
+            --metadata \
+            --chunk_size 5000 \
+            --workers 12
+            
+        # fit reduced basis with randomized SVD
+        python generate_reduced_basis.py \
+            -d "${dataset_dir}/${partition}/" \
+            -p "${dataset_dir}/${partition}/PSD" \
+            -s config_files/static_args.ini \
+            -f reduced_basis.npy \
+            --ifos "H1" "L1" \
+            --bandpass \
+            --whiten \
+            --overwrite \
+            --verbose \
+
+        
+    else
+        # validation and test waveforms are noisy
+        python generate_waveforms.py \
+            -d "${dataset_dir}/${partition}/" \
+            -s config_files/static_args.ini \
+            --psd_dir "${dataset_dir}/${partition}/PSD/" \
+            --add_noise \
+            --projections_only \
+            --overwrite \
+            --verbose \
+            --validate \
+            --metadata \
+            --ifos "H1" "L1" \
+            --chunk_size 5000 \
+            --workers 12
+    fi
 
 done
 
-# # fit reduced basis
-python generate_reduced_basis.py \
-    -d "${dataset_dir}/basis/" \
-    -p "${dataset_dir}/basis/PSD" \
-    -s config_files/static_args.ini \
-    -f reduced_basis.npy \
-    --overwrite \
-    --verbose \
-    --ifos "H1" "L1" \
 
 # # to do:
 # # print out size of saved datasets in MB?

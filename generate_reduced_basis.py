@@ -12,10 +12,9 @@ from numpy.lib.format import open_memmap
 
 from sklearn.utils.extmath import randomized_svd
 
-from pycbc.types import load_frequencyseries
-
 # local imports
-from utils.config import read_ini_config
+from data.config import read_ini_config
+from data.noise import load_psd_from_file
 
 # TO DO: Implement logging over print statements
 import logging
@@ -49,15 +48,13 @@ def fit_reduced_basis(
     basis_file = out_dir / file_name
     
     # load projections from disk as copy-on-write memory mapped array
-    projections = np.load(str(data_dir / 'projections.npy'), mmap_mode='c')
-    bandpassed_frequencies = static_args['fd_length'] - int(static_args['f_lower'] / static_args['delta_f'])
-    basis = np.empty((len(ifos), bandpassed_frequencies, num_basis), dtype=projections.dtype)
-    
+    projections = np.load(str(data_dir / 'projections.npy'), mmap_mode='c')  # copy-on-write
+    # n_bandpassed_frequencies = static_args['fd_length'] - int(static_args['f_lower'] / static_args['delta_f'])
     basis = open_memmap(
         filename=basis_file,
         mode='w+',  # create or overwrite file
         dtype=projections.dtype,
-        shape=(len(ifos), bandpassed_frequencies, num_basis),
+        shape=(len(ifos), static_args['fd_length'], num_basis),
     )
 
     for i, ifo in enumerate(ifos):
@@ -68,16 +65,17 @@ def fit_reduced_basis(
         # get projected waveform data
         data = projections[:, i, :]
 
-        # whiten data
+        # whiten data - need to whiten assuming gaussian data if PSD not provided?
         if whiten:
             psd_file = Path(psd_dir) / f'{ifo}_PSD.npy'
             assert psd_file.is_file(), f"{psd_file} does not exist."
-            psd = load_frequencyseries(psd_file)
+            psd = load_psd_from_file(psd_file)
             data /= psd[:static_args['fd_length']] ** 0.5
     
-        # filter out values less than f_lower (20Hz)
         if bandpass:
-            data = data[:, int(static_args['f_lower'] / static_args['delta_f']):]
+            # filter out values less than f_lower (e.g. 20Hz)
+            data[:, :int(static_args['f_lower'] / static_args['delta_f'])] = 0.  # set to zero approach
+            # data = data[:, int(static_args['f_lower'] / static_args['delta_f']):]  # array truncation approach
 
         # reduced basis for projected waveforms
         _, _, Vh = randomized_svd(data, num_basis)
@@ -90,21 +88,29 @@ def fit_reduced_basis(
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Arguments for randomized SVD fitting code.')
     
+    # configuration
     parser.add_argument('-n', '--num_basis', dest='num_basis', default=1000, type=int, help="Number of reduced basis elements to fit.")
     parser.add_argument('-i', '--ifos', type=str, nargs='+', default=['H1', 'L1'], help='The interferometers to project data onto - assumes extrinsic parameters are present.')
+    parser.add_argument('-s', '--static_args', dest='static_args_ini', action='store', type=str, help='The file path of the static arguments configuration .ini file.')
 
+    # data directories
     parser.add_argument('-d', '--data_dir', default='datasets/basis', dest='data_dir', type=str, help='The output directory to load generated waveform files.')
     parser.add_argument('-p', '--psd_dir', default='datasets/basis/PSD', dest='psd_dir', type=str, help='The output directory to load generated PSD files.')
     parser.add_argument('-o', '--out_dir', dest='out_dir', type=str, help='The output directory to save generated reduced basis files.')
     parser.add_argument('-f', '--file_name', default='parameters.csv', dest='file_name', type=str, help='The output .csv file name to save the generated parameters.')
-    parser.add_argument('-s', '--static_args', dest='static_args_ini', action='store', type=str, help='The file path of the static arguments configuration .ini file.')
-
     parser.add_argument('--overwrite', default=False, action="store_true", help="Whether to overwrite files if they already exists.")
-    
+
+    # signal processing
+    parser.add_argument('--whiten', default=False, action="store_true", help="Whether to whiten the data with the provided PSD before fitting a reduced basis.")
+    parser.add_argument('--bandpass', default=False, action="store_true", help="Whether to truncate the frequency domain data below 'f_lower' specified in the static args.")
+
+    # validation
+
     # random seed
     # parser.add_argument('--seed', type=int")  # to do
     # parser.add_argument("-l", "--logging", default="INFO", choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'], help="Set the logging level")
     parser.add_argument('-v', '--verbose', default=False, action="store_true", help="Sets verbose mode to display progress bars.")
+    # parser.add_argument('--validate', default=False, action="store_true", help='Whether to validate a sample of the data to check for correctness.')
 
     args = parser.parse_args()
     

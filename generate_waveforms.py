@@ -6,8 +6,9 @@ import argparse
 import logging
 
 from pathlib import Path
-from typing import List, Optional
+from typing import Optional, Union, Dict, List
 from functools import partial
+from data.noise import load_psd_from_file
 from tqdm import tqdm
 from datetime import datetime
 
@@ -16,17 +17,72 @@ import concurrent.futures
 
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
 
 from numpy.lib.format import open_memmap
 
 from pycbc.detector import Detector
+from pycbc.types.frequencyseries import FrequencySeries
 
 # local imports
-from utils.config import read_ini_config
-from utils.waveforms import (
+from data.config import read_ini_config
+from data.noise import load_psd_from_file, frequency_noise_from_psd
+from data.waveforms import (
     generate_intrinsic_waveform,
     batch_project, get_sample_frequencies,
 )
+
+
+def validate_waveform(
+    waveform: np.ndarray,
+    static_args: Dict[str, float],
+    out_dir: Union[str, os.PathLike],
+    name: Optional[str]=None,
+):
+    # create out dir if it does not exist
+    out_dir = Path(out_dir)
+    out_dir.mkdir(exist_ok=True)
+
+    # Generate waveform
+    assert waveform.shape[0] == 2, "First dimension of waveform sample must be 2 (+ and x polarizations)."
+    assert waveform.shape[1] == static_args['fd_length'], "Waveform length not expected given provided static_args."
+    hp, hc = waveform
+    plus = FrequencySeries(hp, delta_f=static_args['delta_f'], copy=True)
+    cross = FrequencySeries(hc, delta_f=static_args['delta_f'], copy=True)
+
+    # time shift - should we do this when we create the waveform?
+    # plus = plus.cyclic_time_shift(static_args['seconds_before_event'])
+    # cross = cross.cyclic_time_shift(static_args['seconds_before_event'])
+    # plus._epoch += static_args['seconds_before_event']
+    # cross._epoch += static_args['seconds_before_event']
+
+    # ifft to time domain
+    sp = plus.to_timeseries(delta_t=static_args['delta_t'])
+    sc = cross.to_timeseries(delta_t=static_args['delta_t'])
+
+    # plot plus / cross polarizations
+    # we use a different colour palette to prevent confusion with interoferometers H1 and L1
+    fig, ax = plt.subplots(nrows=1, ncols=1, figsize=(16, 4))
+    ax.plot(sp.sample_times, sp, label='Plus', color='tab:pink')  # pink for plus
+    ax.plot(sc.sample_times, sc, label='Cross', color='tab:cyan')  # cyan for cross
+    ax.set_ylabel('Strain')
+    ax.set_xlabel('Time (s)')
+    ax.grid('both')
+        
+    aux_desc='' if name is None else f' ({name})'
+    ax.set_title(f"IFFT of Simulated {static_args['approximant']} Waveform Polarizations{aux_desc}", fontsize=14)
+    # ax.set_xlim(-0.5, 0.5)  #  should be configured by static_args
+    # ax.set_ylim(-1.25e-20, 1.25e-20)
+    ax.legend(loc='upper left')
+
+    fig.tight_layout()
+    fig.savefig(out_dir / 'intrinsic_polarizations.png')
+    fig.show()
+
+
+def validate_projections():
+    pass
+
 
 def generate_waveform_dataset(
     static_args_ini: str,
@@ -34,13 +90,16 @@ def generate_waveform_dataset(
     out_dir: Optional[str]=None,
     params_file: str='parameters.csv',
     ifos: Optional[List[str]]=None,
-    downcast: bool=False,
-    workers: int=1,
-    chunk_size: int=2500,
-    verbose: bool=True,
+    add_noise: bool=False,
+    psd_dir: Optional[str]=None,
+    projections_only: bool=False,
     overwrite: bool=False,
     metadata: bool=True,
-    projections_only: bool=False,
+    downcast: bool=False,
+    verbose: bool=True,
+    validate: bool=False,
+    workers: int=1,
+    chunk_size: int=2500,
 ):
     """Function to generate a dataset of intrinsic waveform parameters using Python multiprocessing.
     
@@ -76,17 +135,16 @@ def generate_waveform_dataset(
     projections_file = out_dir / 'projections.npy'
     if not overwrite:
         if waveform_file.is_file():
-            logging.debug('Aborting - {waveform_file} exists but overwrite is False.')
+            logging.debug(f'Aborting - {waveform_file} exists but overwrite is False.')
             return
         if projections_file.is_file():
-            logging.debug('Aborting - {projections_file} exists but overwrite is False.')
+            logging.debug(f'Aborting - {projections_file} exists but overwrite is False.')
             return
 
     if metadata:
         # load static_args.ini and save as .json in dataset
         in_args_path = Path(static_args_ini)
         out_args_path = out_dir / f'{in_args_path.stem}.json'
-        if overwrite: out_args_path.unlink(missing_ok=True)
         with open(out_args_path, 'w') as f:
             json.dump(static_args, f)
 
@@ -99,12 +157,22 @@ def generate_waveform_dataset(
         for extrinsic in required_extrinsics:
             assert extrinsic in parameters.columns, f"{extrinsic} not in {required_extrinsics}."
 
-        detectors = [Detector(ifo) for ifo in ifos]
+        detectors = {ifo: Detector(ifo) for ifo in ifos}
         waveform_desc = f'projected ({ifos})'
         sample_frequencies = get_sample_frequencies(
             f_final=static_args['f_final'],
             delta_f=static_args['delta_f']
         )
+
+        # load PSD files for coloured noise generation
+        if add_noise and psd_dir is not None:
+            psds = {}
+            for ifo in ifos:
+                # coloured noise from psd
+                psd_file = Path(psd_dir) / f'{ifo}_PSD.npy'
+                assert psd_file.is_file(), f"{psd_file} does not exist."
+                psds[ifo] = load_psd_from_file(psd_file)
+
 
         # https://numpy.org/devdocs/reference/generated/numpy.lib.format.open_memmap.html#numpy.lib.format.open_memmap
         projection_memmap = open_memmap(
@@ -170,20 +238,27 @@ def generate_waveform_dataset(
                     progress.update(1)
                 progress.refresh()
 
-                # batch project for each detector - output should be (batch, ifo, length)
+                # batch project for each detector
                 if detectors is not None:
-                    projections = np.stack([
-                        batch_project(
-                            detector,
-                            samples,
-                            waveforms,
-                            static_args,
-                            sample_frequencies,
-                        ) for detector in detectors],
-                        axis=1
-                    )
+                    projections = []
+                    for i, ifo in enumerate(ifos):
+                        projection = batch_project(detectors[ifo], samples, waveforms, static_args, sample_frequencies)
+                        
+                        if add_noise:
+                            if psd_dir is None:
+                                # gaussian white noise in frequency domain
+                                size = (end-start, static_args['fd_length'])  # gaussian for each batch for each freq bin
+                                noise = np.random.normal(0., 1., size) + 1j*np.random.normal(0., 1., size)
+                                noise = noise.astype(dtype)
+                            else:
+                                # coloured noise from psd -- cut to fd_length (bandpass filter for higher frequencies)
+                                noise = frequency_noise_from_psd(psds[ifo], n=end-start)[:, :static_args['fd_length']]
+                            
+                            projection += noise
 
-                    projection_memmap[start:end, :, :] = projections
+                        projections.append(projection)
+                    
+                    projection_memmap[start:end, :, :] = np.stack(projections, axis=1)  # output should be (batch, ifo, length)
 
                 if not projections_only:
                     waveform_memmap[start:end, :, :] = waveforms
@@ -191,42 +266,39 @@ def generate_waveform_dataset(
                 # notify timer that batch has been saved
                 progress.set_postfix(saved=saved)
 
+    if validate:
+        validate_waveform(waveforms[-1], static_args, out_dir / 'figures', name=f'idx={n_samples}')
+        # validate_projections(waveforms[-1], static_args, out_dir / 'figures', name=f'idx={n_samples}')
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Arguments for waveform generation code.')
 
-    # configuration files
-    parser.add_argument('-d', '--data_dir', dest='data_dir', type=str, help='The input directory to load parameter files.')
-    parser.add_argument('-o', '--out_dir', dest='out_dir', type=str, help='The output directory to save generated waveform files.')
+    # configuration
+    parser.add_argument('-i', '--ifos', type=str, nargs='+', help='The interferometers to project data onto - assumes extrinsic parameters are present.')
     parser.add_argument('-s', '--static_args', dest='static_args_ini', action='store', type=str, help='The file path of the static arguments configuration .ini file.')
     parser.add_argument('-p', '--params_file', dest='params_file', default='parameters.csv', type=str, help='The input .csv file of generated parameters to load.')
-
+    parser.add_argument('--add_noise', default=False, action="store_true", help="Whether to add frequency noise - if PSDs are provided we add coloured noise, else Gaussian.")
+    
+    # data directories
+    parser.add_argument('-d', '--data_dir', dest='data_dir', type=str, help='The input directory to load parameter files.')
+    parser.add_argument('-o', '--out_dir', dest='out_dir', type=str, help='The output directory to save generated waveform files.')
+    parser.add_argument('--psd_dir', dest='psd_dir', type=str, help='The output directory to save generated waveform files.')
     parser.add_argument('--overwrite', default=False, action="store_true", help="Whether to overwrite files if data_dir already exists.")
     parser.add_argument('--metadata', default=False, action="store_true", help="Whether to copy config file metadata to data_dir with parameters.")
     parser.add_argument('--projections_only', default=False, action="store_true", help="Whether to only save projections.npy files and ignore intrinsic waveforms.npy.")
+    # to do: add functionality to save noise so we can reconstruct original waveform in visualisations, training, etc.
 
     # logging
     parser.add_argument("-l", "--logging", default="INFO", choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'], help="Set the logging level")
     parser.add_argument('-v', '--verbose', default=False, action="store_true", help="Sets verbose mode to display progress bars.")
+    parser.add_argument('--validate', default=False, action="store_true", help='Whether to validate a sample of the data to check for correctness.')
 
     # multiprocessing
     parser.add_argument('-c', '--chunk_size', type=int, default=2500, help='The number of workers to use for Python multiprocessing.')
     parser.add_argument('-w', '--workers', type=int, default=8, help='The number of workers to use for Python multiprocessing.')
     
     # # generation
-    
     # parser.add_argument('--seed', type=int, help="Random seed.")  # to do
-
-    parser.add_argument(
-        '-i', '--ifos', type=str, nargs='+',
-        help='The interferometers to project data onto - assumes extrinsic parameters are present.'
-    )
-
-    # check outputs - maybe generate a test plot to see if data was generated correctly?
-    # parser.add_argument(
-    #     '--check', type=int, nargs='+',
-    #     help='Whether to generate visualise plots for samples selected by index position.'
-    # )
 
 
 

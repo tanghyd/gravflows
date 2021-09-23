@@ -26,16 +26,16 @@
 
 # dataset needs to be specified (i.e. O1, O1_16KHz, O2) etc
 # 4KHz data should download much quicker than 16KHz (as expected)
-# if dataset is changed between observing runs
-# the gps times also need to be edited as well.
+# if dataset is changed between observing runs then the gps times
+# (and also detectors, potentially) need to be edited as well.
 
 # nohup can be used for asynchronous data download in background
 # bash command:
 # python async_download.py \
-# --queue_rate 0.1 \
-# --ncon 10 \
-# --buffer_size 4096 \
-# --dir /mnt/datahole/daniel/gwosc  # replace with desired directory
+# --queue_rate 0.1 \  # add urls to queue at rate of 0.1 per sec (10s per iter)
+# --ncon 10 \  # number of concurrent connections  (warning: more than this suffers from disconnects from idle DL)
+# --buffer_size 4096 \  # minimum number of bytes to await before we save data from stream
+# --dir /mnt/datahole/daniel/gwosc  # replace with desired output directory
 
 import os
 import json

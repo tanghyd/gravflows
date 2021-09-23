@@ -1,6 +1,11 @@
 # data
 datasets
 
+# cache
+__pycache__/
+*.pyc
+.ipynb_checkpoints
+
 # normalizing flows
-gravflows/
-utils/pytorch.py
+gravflows/reduced_basis.py
+data/pytorch.py

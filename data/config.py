@@ -42,6 +42,9 @@ def amend_static_args(static_args: Dict[str, str]):
         have been added.
     """
 
+    # to do - automatic values if seconds before/after aren't provided?
+    # to do - handle sample_length vs. waveform_length
+
     # Create a copy of the original static_args
     args = copy.deepcopy(static_args)
     
@@ -134,7 +137,7 @@ def read_ini_config(
             - `variable_arguments` should simply be a list of all the
             parameters which get randomly sampled from the specified
             distributions, usually using an instance of
-            :class:`utils.waveforms.WaveformParameterGenerator`.
+            :class:`data.waveforms.WaveformParameterGenerator`.
             - `static_arguments` should be a dictionary containing the keys
             and values of the parameters that are the same for each
             example that is generated (i.e., the non-physical parameters

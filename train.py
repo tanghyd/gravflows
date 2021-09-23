@@ -11,7 +11,6 @@ from pathlib import Path
 import numpy as np
 
 import corner
-import matplotlib.pyplot as plt
 
 import torch
 
@@ -25,14 +24,13 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
 
 # local imports
-from gravflows import nde_flows
-from gravflows.utils.parameters import (
-    ParameterGenerator, compute_parameter_statistics,
+from flows import nde_flows
+from data.pytorch import BasisDataset
+from data.parameters import (
+    ParameterGenerator,
+    compute_parameter_statistics,
     get_parameter_latex_labels
 )
-from gravflows.utils.strain import get_standardization_factor
-from gravflows.utils.pytorch import StrainDataset, BasisDataset
-
 
 def setup_nccl(rank, world_size):
     # os.environ['CUDA_LAUNCH_BLOCKING'] = '1'

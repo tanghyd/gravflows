@@ -113,14 +113,17 @@ def load_psd_from_file(
     f_lower: Optional[float]=None,
     f_final: Optional[float]=None,
 ) -> FrequencySeries:
-    """Load a psd from file (i.e. from a .txt file) and subset
+    """Load a psd from file (i.e. from a .txt or .npy file file) and subset
     according to lower and final frequency bands"""
     psd = pycbc.types.load_frequencyseries(file)
     
     if delta_f is not None and psd.delta_f != delta_f:
+        # interpolation can cause some issues near edges
+        # if we have available data, we should ideally
+        # generate an accurate psd from source
         psd = pycbc.psd.interpolate(psd, delta_f)
     
-    start = int(f_lower/delta_f)if f_lower is not None else 0.
+    start = int(f_lower/delta_f)if f_lower is not None else 0
     end = int(f_final/delta_f) if f_final is not None else len(psd)
 
     return psd[start:end]
@@ -143,7 +146,6 @@ def get_strain_from_gwf_files(
         'Invalid target_sampling_rate: Not a divisor of original_sampling_rate!'
     )
     
-    # offset = int(window / 2)
     sampling_factor = int(original_sampling_rate / target_sampling_rate)
     samples = defaultdict(list)
     
@@ -222,11 +224,7 @@ def get_strain_from_hdf_files(
     assert (original_sampling_rate % target_sampling_rate) == 0, (
         'Invalid target_sampling_rate: Not a divisor of original_sampling_rate!'
     )
-
-    # compute the offset = half the interval width 
-    # intervals are centered around the given gps_time)
-    # offset = int(window / 2)
-
+    
     # Compute the resampling factor
     sampling_factor = int(original_sampling_rate / target_sampling_rate)
 

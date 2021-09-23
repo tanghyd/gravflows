@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import List, Union
 
 # local imports
-from utils.parameters import ParameterGenerator
+from data.parameters import ParameterGenerator
 
 # to do - put this in on repo
 def rm_tree(pth: Union[str, os.PathLike]):
@@ -79,7 +79,7 @@ if __name__ == '__main__':
     parser.add_argument('--metadata', default=False, action="store_true", help="Whether to copy config file metadata to data_dir with parameters.")
     parser.add_argument(
         '-c', '--config_files', dest='config_files', type=str, action='append', #nargs='+',
-        help='A file path to a compatible PyCBC params.ini config files. Can be called multiple times if there are no duplicates.'
+        help='A file path to a compatible PyCBC ini config files. Can be called multiple times if there are no duplicates.'
     )
     
     # random seed
@@ -88,6 +88,7 @@ if __name__ == '__main__':
     # logging
     # parser.add_argument("-l", "--logging", default="INFO", choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'], help="Set the logging level")
     # parser.add_argument('-v', '--verbose', default=False, action="store_true", help="Sets verbose mode to display progress bars.")
+    # parser.add_argument('--validate', default=False, action="store_true", help='Whether to validate a sample of the data to check for correctness.')
 
     args = parser.parse_args()
     assert args.config_files is not None, ".ini config files must be provided with -c or --config_files."
