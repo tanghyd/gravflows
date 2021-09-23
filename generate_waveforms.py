@@ -77,12 +77,58 @@ def validate_waveform(
 
     fig.tight_layout()
     fig.savefig(out_dir / 'intrinsic_polarizations.png')
-    fig.show()
 
 
-def validate_projections():
-    pass
+def validate_projections(
+    projections: np.ndarray,
+    static_args: Dict[str, float],
+    out_dir: Union[str, os.PathLike],
+    ifos: Optional[List[str]]=None,
+    name: Optional[str]=None,
+):
+    # full names for plotting
+    interferometers = {'H1': 'Hanford', 'L1': 'Livingston', 'V1': 'Virgo', 'K1': 'KAGRA'}
 
+    # create out dir if it does not exist
+    out_dir = Path(out_dir)
+    out_dir.mkdir(exist_ok=True)
+
+    # Generate waveform
+    if ifos is not None:
+        assert projections.shape[0] == len(ifos), "First dimension of waveform sample must be 2 (+ and x polarizations)."
+    assert projections.shape[1] == static_args['fd_length'], "Waveform length not expected given provided static_args."
+
+    nrows, ncols = 1, 1
+    fig, ax = plt.subplots(nrows=nrows, ncols=ncols, figsize=(16, 4*nrows))
+
+    # ifft to time domain
+    for i in range(projections.shape[0]):
+        label = None if ifos is None else interferometers[ifos[i]]
+        h = FrequencySeries(projections[i, :], delta_f=static_args['delta_f'], copy=True)
+        strain = h.to_timeseries(delta_t=static_args['delta_t'])
+        ax.plot(strain.sample_times, strain, label=label, alpha=0.6)
+        
+    # ax.set_xlim(-0.5, 0.5)
+    # ax.set_ylim(-1.25e-20, 1.25e-20)
+    ax.set_ylabel('Strain')
+    ax.set_xlabel('Time (s)')
+    ax.grid('both')
+    ax.legend(loc='upper left')
+        
+    # place a text box in upper left in axes coords
+    # textstr = '$\mathrm{ra}=%.2f$\n$\mathrm{dec}=%.2f$\n$d_L=%.2f$'%(
+    #     extrinsic.ra, extrinsic.dec, extrinsic.distance
+    # )
+
+    # # these are matplotlib.patch.Patch properties
+    # props = dict(alpha=0.5, facecolor='wheat')
+    # ax.text(0.905, 0.92, textstr, transform=ax.transAxes, fontsize=14,
+    #         verticalalignment='top', bbox=props)
+        
+    aux_desc='' if name is None else f' ({name})'
+    fig.suptitle(f"IFFT of Simulated {static_args['approximant']} Projected Waveforms at Interferometers{aux_desc}", fontsize=16) 
+    fig.tight_layout()
+    fig.savefig(out_dir / 'projection_examples.png')
 
 def generate_waveform_dataset(
     static_args_ini: str,
@@ -238,11 +284,13 @@ def generate_waveform_dataset(
                     progress.update(1)
                 progress.refresh()
 
-                # batch project for each detector
                 if detectors is not None:
-                    projections = []
+                    # output should be (batch, ifo, length)
+                    projections = np.empty((end - start, len(ifos), static_args['fd_length']), dtype=dtype)
+                    
                     for i, ifo in enumerate(ifos):
-                        projection = batch_project(detectors[ifo], samples, waveforms, static_args, sample_frequencies)
+                        # batch project for each detector
+                        projections[:, i, :] = batch_project(detectors[ifo], samples, waveforms, static_args, sample_frequencies)
                         
                         if add_noise:
                             if psd_dir is None:
@@ -254,11 +302,9 @@ def generate_waveform_dataset(
                                 # coloured noise from psd -- cut to fd_length (bandpass filter for higher frequencies)
                                 noise = frequency_noise_from_psd(psds[ifo], n=end-start)[:, :static_args['fd_length']]
                             
-                            projection += noise
-
-                        projections.append(projection)
+                            projections[:, i, :] += noise
                     
-                    projection_memmap[start:end, :, :] = np.stack(projections, axis=1)  # output should be (batch, ifo, length)
+                    projection_memmap[start:end, :, :] = projections 
 
                 if not projections_only:
                     waveform_memmap[start:end, :, :] = waveforms
@@ -267,8 +313,10 @@ def generate_waveform_dataset(
                 progress.set_postfix(saved=saved)
 
     if validate:
-        validate_waveform(waveforms[-1], static_args, out_dir / 'figures', name=f'idx={n_samples}')
-        # validate_projections(waveforms[-1], static_args, out_dir / 'figures', name=f'idx={n_samples}')
+        # this should get the final sample in the full dataset
+        validate_waveform(waveforms[-1], static_args, out_dir / 'figures', name=f'sample_idx={n_samples}')
+        if detectors is not None:
+            validate_projections(projections[-1], static_args, out_dir / 'figures', ifos=ifos, name=f'sample_idx={n_samples}')
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Arguments for waveform generation code.')
