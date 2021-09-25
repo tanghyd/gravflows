@@ -149,6 +149,7 @@ class BasisEncoder(nn.Module):
         self,
         basis_dir: Union[str, os.PathLike],
         n: Optional[int]=None,
+        dtype=torch.complex64,
     ):
         super().__init__()
         # load reduced basis (randomized_svd: Vh = V.T.conj())
@@ -161,14 +162,16 @@ class BasisEncoder(nn.Module):
             basis = basis[:, :, :n]
         
         # self.basis = nn.Parameter(torch.from_numpy(basis[None]))
-        self.register_buffer('basis', torch.from_numpy(basis[None]))
-        self.register_buffer('scaler', torch.ones((self.basis.shape[1], self.basis.shape[3]))[None])
+        self.register_buffer('basis', torch.tensor(basis[None], dtype=dtype))
+        self.register_buffer('scaler', torch.ones((self.basis.shape[1], self.basis.shape[3]), dtype=dtype)[None])
     
     def _generate_coefficients(
         self,
         projections_file: str='projections.npy'
     ):
         # batch process data (especially on GPU with memory limitations)A
+        device = list(self.parameters())[0].device
+        dtype = list(self.parameters())[0].dtype
         projections = np.load(self.basis_dir / projections_file, mmap_mode='r')
         coefficients = []
 
@@ -185,8 +188,7 @@ class BasisEncoder(nn.Module):
                     end = (i+1)*chunk_size
 
                 # batch matrix multiplication with pytorch
-                device = list(self.parameters())[0].device
-                waveform = torch.tensor(projections[start:end, :], device=device)
+                waveform = torch.tensor(projections[start:end, :], dtype, device)
                 coefficients.append(self(waveform).cpu().numpy())
 
         return np.concatenate(coefficients, axis=0)
@@ -202,8 +204,9 @@ class BasisEncoder(nn.Module):
         _, static_args = read_ini_config(static_args_ini)  # should we store args on nn.Module?
         
         device = list(self.parameters())[0].device
+        dtype = list(self.parameters())[0].dtype
         standardization = get_standardization_factor(coefficients, static_args)
-        self.scaler = torch.tensor(standardization, device=device)
+        self.scaler = torch.tensor(standardization, dtype, device)
         
     def forward(self, x):
         return torch.einsum('bij, bijk -> bik', x, self.basis) * self.scaler

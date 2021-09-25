@@ -1,15 +1,17 @@
 import os
 import signal
 import traceback
-# from numpy.lib.function_base import _median_dispatcher
 
 from pathlib import Path
-from typing import Optional
+from typing import List
 from argparse import ArgumentParser
+
+import time
 from tqdm import tqdm
 from datetime import datetime, timedelta
 
 import numpy as np
+import pandas as pd
 
 import corner
 
@@ -26,6 +28,8 @@ from torch.utils.data.distributed import DistributedSampler
 
 import pycbc.psd
 from pycbc.catalog import Merger
+
+import bilby
 
 # local imports
 from flows import nde_flows
@@ -45,11 +49,76 @@ def setup_nccl(rank, world_size):
 def cleanup_nccl():
     distributed.destroy_process_group()
 
-def tensorboard_writer(queue: mp.Queue, log_dir: Optional[str]):
+def tensorboard_writer(
+    queue: mp.Queue,
+    log_dir: str,
+    parameters: List[str],
+):
     if log_dir is None:
         tb = SummaryWriter()
     else:
         tb = SummaryWriter(log_dir)
+
+    # bilby setup - specify the output directory and the name of the bilby run
+    outdir = '../gravflows/bilby_runs/GW150914'
+    result = bilby.result.read_in_result(outdir=outdir, label='GW150914')
+
+    bilby_parameters = [
+        'mass_1', 'mass_2', 'phase', 'geocent_time',
+        'luminosity_distance', 'a_1', 'a_2', 'tilt_1', 'tilt_2',
+        'phi_12', 'phi_jl', 'theta_jn', 'psi', 'ra', 'dec'
+    ]
+    bilby_samples = result.posterior[bilby_parameters].values
+
+    # Shift the time of coalescence by the trigger time
+    bilby_samples[:,3] = bilby_samples[:,3] - Merger('GW150914').time
+
+    bilby_df = pd.DataFrame(bilby_samples, columns=bilby_parameters)
+    bilby_df = bilby_df.rename(columns={'luminosity_distance': 'distance', 'geocent_time': 'time'})
+    bilby_df = bilby_df.loc[:, parameters]
+    
+    domain = [
+        [25, 60],  # mass 1
+        [15, 50],  # mass 2
+        [0, 2*np.pi],  # phase 
+        [0,1],  # a_1
+        [0,1],  # a 2
+        [0,np.pi],  # tilt 1
+        [0,np.pi],  # tilt 2
+        [0, 2*np.pi],  # phi_12
+        [0, 2*np.pi],  # phi_jl
+        [0,np.pi],  # theta_jn
+        [0,np.pi],  # psi
+        [0.4,3.4],  # ra
+        [-np.pi/2,.1],  # dec
+        [0.005,0.055],  # tc
+        [100,800],  # distance
+    ]
+
+    # domain = [
+    #     [30,55],  # mass 1
+    #     [20,45],  # mass 2
+    #     [0, 2*np.pi],  # phase 
+    #     [0,1],  # a_1
+    #     [0,1],  # a 2
+    #     [0,np.pi],  # tilt 1
+    #     [0,np.pi],  # tilt 2
+    #     [0, 2*np.pi],  # phi_12
+    #     [0, 2*np.pi],  # phi_jl
+    #     [0,np.pi],  # theta_jn
+    #     [0,np.pi],  # psi
+    #     [0.6,3.2],  # ra
+    #     [-np.pi/2,.1],  # dec
+    #     [0.015,0.045],  # tc
+    #     [100,800],  # distance
+    # ]
+
+    cosmoprior = bilby.gw.prior.UniformSourceFrame(
+        name='luminosity_distance',
+        minimum=1e2,
+        maximum=1e3,
+    )
+
     while True:
         try:
             epoch, scalars, samples, labels = queue.get()
@@ -58,19 +127,35 @@ def tensorboard_writer(queue: mp.Queue, log_dir: Optional[str]):
                 tb.add_scalar(key, value, epoch)
             
             if samples is not None:
+                assert isinstance(samples, torch.Tensor)
+                samples_df = pd.DataFrame(samples.numpy(), columns=parameters)
+                
+                weights = cosmoprior.prob(samples_df['distance'])
+                weights = weights / np.mean(weights)
+
                 fig = corner.corner(
-                    samples,
+                    bilby_df,
+                    levels=[0.5, 0.9],
+                    scale_hist=True,
+                    plot_datapoints=False,
+                    labels=labels,
+                    color='red',
+                )
+
+                corner.corner(
+                    samples_df,
                     levels=[0.5, 0.9],
                     scale_hist=True,
                     plot_datapoints=False,
                     labels=labels,
                     show_titles=True,
-    #                 fontsize=18,
-    #                 truths=ground_truths[0].numpy()
-                #     range=corner_range,
+                    fontsize=18,
+                    fig=fig,
+                    range=domain,
+                    weights=weights * len(bilby_samples) / len(samples_df),
                 )
 
-                fig.suptitle('Gravitational Wave Parameter Estimates', fontsize=22)
+                fig.suptitle('Gravitational Wave Parameter Estimation: NSF (black) vs. Bilby (red)', fontsize=22)
                 tb.add_figure('corner', fig, epoch)
             tb.flush()
 
@@ -94,18 +179,12 @@ def train_distributed(
     torch.cuda.set_device(rank)  # rank is gpu index
     device = torch.device('cuda')
 
-    # setup asynchronous figure generation and tensorboard writer process
-    log_dir = f"{datetime.now().strftime('%b%d_%H-%M-%S')}_{os.uname().nodename}"
-    if rank == 0:  
-        queue = mp.SimpleQueue()
-        tb_process = mp.Process(target=tensorboard_writer, args=(queue, f'runs/{log_dir}'))
-        tb_process.start()
-
     # directories
     noise_dir = Path('/mnt/datahole/daniel/gwosc/O1')
     psd_dir = Path("/mnt/datahole/daniel/gravflows/datasets/train/PSD/")
     waveform_dir = Path('/mnt/datahole/daniel/gravflows/datasets/train/')
     basis_dir = Path('/mnt/datahole/daniel/gravflows/datasets/basis/')
+    log_dir = f"{datetime.now().strftime('%b%d_%H-%M-%S')}_{os.uname().nodename}"  # tb
 
     save_dir = Path('model_weights/')
     experiment_dir = save_dir / log_dir
@@ -121,12 +200,21 @@ def train_distributed(
 
     # parameter generator and standardization
     generator = ParameterGenerator(config_files=[waveform_params_ini, projection_params_ini])
-    mean = torch.tensor(generator.statistics['mean'].values, device=device)
-    std = torch.tensor(generator.statistics['std'].values, device=device)
+    mean = torch.tensor(generator.statistics['mean'].values, device=device, dtype=torch.float32)
+    std = torch.tensor(generator.statistics['std'].values, device=device, dtype=torch.float32)
 
     # power spectral density
     ifos = ('H1', 'L1')
     # interferometers = {'H1': 'Hanford', 'L1': 'Livingston', 'V1': 'Virgo', 'K1': 'KAGRA'}
+
+    # setup asynchronous figure generation and tensorboard writer process
+    if rank == 0:  
+        queue = mp.SimpleQueue()
+        tb_process = mp.Process(
+            target=tensorboard_writer,
+            args=(queue, f'runs/{log_dir}', generator.parameters)
+        )
+        tb_process.start()
 
     psds = {}
     for ifo in ifos:
@@ -169,13 +257,13 @@ def train_distributed(
 
     with torch.no_grad():
         # generate GW150914 reduced basis coefficients
-        gw150914 = encoder(torch.tensor(np.stack(list(event_strain.values()))[None], device=device))
+        gw150914 = encoder(torch.tensor(np.stack(list(event_strain.values()))[None], dtype=torch.complex64, device=device))
         gw150914 = torch.cat([gw150914.real, gw150914.imag], dim=1).to(torch.float32)
         gw150914 = gw150914.reshape(gw150914.shape[0], gw150914.shape[1]*gw150914.shape[2])
         
 
     # training data set
-    batch_size = 1000
+    batch_size = 1500
 
     dataset = WaveformDataset(
         data_dir=waveform_dir,
@@ -197,12 +285,11 @@ def train_distributed(
     dataloader = DataLoader(
         dataset,
         shuffle=False,
-        num_workers=8,
+        num_workers=6,
         batch_size=batch_size,
         sampler=sampler,
         pin_memory=True,
         persistent_workers=True,
-        # prefetch_factor=4,
         worker_init_fn=dataset._worker_init_fn,
         collate_fn=dataset._collate_fn,
     )
@@ -220,7 +307,7 @@ def train_distributed(
         }
     )
 
-    # sync_bn_flow = nn.SyncBatchNorm.convert_sync_batchnorm(flow, process_group=None)
+    # sync_bn_flow = nn.SyncBatchNorm.convert_sync_batchnorm(flow)
 
     # train
     flow = DDP(flow.to(rank), device_ids=[rank], output_device=rank)
@@ -239,7 +326,7 @@ def train_distributed(
             projections, parameters = next(iterator) 
 
             projections = projections.to(device, non_blocking=True)
-            parameters = parameters.to(device, torch.float32, non_blocking=True)
+            parameters = parameters.to(device, non_blocking=True)
             
             complete = False
             while not complete:
@@ -247,7 +334,7 @@ def train_distributed(
 
                 # project to reduced basis and flatten for 1-d residual network input
                 coefficients = encoder(projections)
-                coefficients = torch.cat([coefficients.real, coefficients.imag], dim=1).to(torch.float32)
+                coefficients = torch.cat([coefficients.real, coefficients.imag], dim=1)
                 coefficients = coefficients.reshape(coefficients.shape[0], coefficients.shape[1]*coefficients.shape[2])
 
                 # negative log-likelihood conditional on strain over mini-batch
@@ -257,7 +344,7 @@ def train_distributed(
                     # async get data from CPU and move to GPU during model forward
                     projections, parameters = next(iterator) 
                     projections = projections.to(device, non_blocking=True)
-                    parameters = parameters.to(device, torch.float32, non_blocking=True)
+                    parameters = parameters.to(device, non_blocking=True)
 
                 except StopIteration:
                     # exit while loop if iterator is complete
@@ -292,14 +379,10 @@ def train_distributed(
                     output_device='cuda'
                 )[0]
                 samples = (samples * std) + mean
-
-                print(f'rank {rank} samples.shape: {samples.shape}')
-                for key, value in zip(generator.latex, samples.T):
-                    print(f'rank {rank} {key} min: {value.min()} max: {value.max()} mean: {value.mean()}')
-
+                
                 distributed.all_gather(world_samples, samples)
-                parameter_samples = torch.cat(world_samples, dim=0).cpu()#.numpy()
-
+                parameter_samples = torch.cat(world_samples, dim=0).cpu()
+                
             if rank == 0:
                 # log average epoch loss across DDP to tensorboard
                 scalars = {
@@ -307,11 +390,7 @@ def train_distributed(
                 } 
                 
                 # send data to async process to generate matplotlib figures
-                print(f'paramter_samples.shape: {parameter_samples.shape}')
-                for key, value in zip(generator.latex, parameter_samples.T):
-                    print(f'{key} min: {value.min()} max: {value.max()} mean: {value.mean()}')
-
-                queue.put((epoch, scalars, parameter_samples.numpy(), generator.latex))
+                queue.put((epoch, scalars, parameter_samples, generator.latex))
                 parameter_samples = None  # reset to None for epochs where there is no corner plot
 
                 if (interval != 0) and (epoch % interval == 0):
@@ -322,17 +401,17 @@ def train_distributed(
             distributed.barrier()
 
         # destroy processes from distributed training
+        if rank == 0:
+            tb_process.terminate()
         cleanup_nccl()
-        tb_process.terminate()
-        tb_process.close()
 
 if __name__ == '__main__':
     parser = ArgumentParser()
 
     # training settings
     parser.add_argument('--num_gpus', type=int, default=1)
-    parser.add_argument('--epochs', type=int, default=10)
-    parser.add_argument('--interval', type=int, default=1)
+    parser.add_argument('--epochs', type=int, default=500)
+    parser.add_argument('--interval', type=int, default=100)
 
     # data directories
     # parser.add_argument('-d', '--data_dir', dest='data_dir', type=str, help='The input directory to load parameter files.')

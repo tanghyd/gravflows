@@ -96,8 +96,8 @@ class WaveformDataset(Dataset):
         parameters = (parameters - mean) / std
         
         # build and typecast data - 0.07s per call (0.14s total) (batch_size=2000)
-        # projections = projections.astype(np.complex64)
-        # parameters = parameters.astype(np.float32)
+        projections = projections.astype(np.complex64)
+        parameters = parameters.astype(np.float32)
         
         # send to torch tensors
         projections = torch.from_numpy(projections)  # (batch, ifo, length)
