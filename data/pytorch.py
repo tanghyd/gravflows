@@ -26,8 +26,10 @@ class WaveformDataset(Dataset):
         extrinsics_ini: Optional[str]=None,
         psd_dir: Optional[Union[str, os.PathLike]]=None,
         ifos: List[str]=['H1','L1'],
+        downcast: bool=False,
     ):
         # load static argument file
+        self.downcast = downcast
         _, self.static_args = read_ini_config(static_args_ini)
 
         # configure data and settings
@@ -96,8 +98,9 @@ class WaveformDataset(Dataset):
         parameters = (parameters - mean) / std
         
         # build and typecast data - 0.07s per call (0.14s total) (batch_size=2000)
-        projections = projections.astype(np.complex64)
-        parameters = parameters.astype(np.float32)
+        if self.downcast:
+            projections = projections.astype(np.complex64)
+            parameters = parameters.astype(np.float32)
         
         # send to torch tensors
         projections = torch.from_numpy(projections)  # (batch, ifo, length)

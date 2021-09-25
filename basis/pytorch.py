@@ -149,7 +149,7 @@ class BasisEncoder(nn.Module):
         self,
         basis_dir: Union[str, os.PathLike],
         n: Optional[int]=None,
-        dtype=torch.complex64,
+        dtype=torch.complex128,
     ):
         super().__init__()
         # load reduced basis (randomized_svd: Vh = V.T.conj())

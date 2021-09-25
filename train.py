@@ -73,7 +73,7 @@ def tensorboard_writer(
     # Shift the time of coalescence by the trigger time
     bilby_samples[:,3] = bilby_samples[:,3] - Merger('GW150914').time
 
-    bilby_df = pd.DataFrame(bilby_samples, columns=bilby_parameters)
+    bilby_df = pd.DataFrame(bilby_samples.astype(np.float32), columns=bilby_parameters)
     bilby_df = bilby_df.rename(columns={'luminosity_distance': 'distance', 'geocent_time': 'time'})
     bilby_df = bilby_df.loc[:, parameters]
     
@@ -200,8 +200,8 @@ def train_distributed(
 
     # parameter generator and standardization
     generator = ParameterGenerator(config_files=[waveform_params_ini, projection_params_ini])
-    mean = torch.tensor(generator.statistics['mean'].values, device=device, dtype=torch.float32)
-    std = torch.tensor(generator.statistics['std'].values, device=device, dtype=torch.float32)
+    mean = torch.tensor(generator.statistics['mean'].values, device=device)#, dtype=torch.float32)
+    std = torch.tensor(generator.statistics['std'].values, device=device)#, dtype=torch.float32)
 
     # power spectral density
     ifos = ('H1', 'L1')
@@ -257,13 +257,13 @@ def train_distributed(
 
     with torch.no_grad():
         # generate GW150914 reduced basis coefficients
-        gw150914 = encoder(torch.tensor(np.stack(list(event_strain.values()))[None], dtype=torch.complex64, device=device))
-        gw150914 = torch.cat([gw150914.real, gw150914.imag], dim=1).to(torch.float32)
+        gw150914 = encoder(torch.tensor(np.stack(list(event_strain.values()))[None], device=device))
+        gw150914 = torch.cat([gw150914.real, gw150914.imag], dim=1)
         gw150914 = gw150914.reshape(gw150914.shape[0], gw150914.shape[1]*gw150914.shape[2])
         
 
     # training data set
-    batch_size = 1500
+    batch_size = 1000
 
     dataset = WaveformDataset(
         data_dir=waveform_dir,
@@ -376,7 +376,8 @@ def train_distributed(
                     flow.module,
                     n=n_samples// world_size,
                     context=gw150914,
-                    output_device='cuda'
+                    output_device='cuda',
+                    dtype=torch.float32,
                 )[0]
                 samples = (samples * std) + mean
                 
@@ -391,7 +392,7 @@ def train_distributed(
                 
                 # send data to async process to generate matplotlib figures
                 queue.put((epoch, scalars, parameter_samples, generator.latex))
-                parameter_samples = None  # reset to None for epochs where there is no corner plot
+                # parameter_samples = None  # reset to None for epochs where there is no corner plot
 
                 if (interval != 0) and (epoch % interval == 0):
                     # save checkpoint and write computationally expensive data to tb
@@ -399,6 +400,7 @@ def train_distributed(
                     torch.save(optimizer.state_dict(), experiment_dir / f'optimizer_{epoch}.pt')
 
             distributed.barrier()
+        
 
         # destroy processes from distributed training
         if rank == 0:

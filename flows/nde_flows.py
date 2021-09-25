@@ -399,7 +399,7 @@ def sample_flow(
     context: Optional[Union[np.ndarray, torch.Tensor]]=None,
     batch_size: int=512,
     output_device: Union[str, torch.device]='cpu',
-    dtype=torch.float32,
+    dtype=torch.float64,
 ):
     """Draw samples from the posterior.
     
