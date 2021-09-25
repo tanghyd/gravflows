@@ -162,8 +162,8 @@ class BasisEncoder(nn.Module):
             basis = basis[:, :, :n]
         
         # self.basis = nn.Parameter(torch.from_numpy(basis[None]))
-        self.register_buffer('basis', torch.tensor(basis[None], dtype=dtype))
-        self.register_buffer('scaler', torch.ones((self.basis.shape[1], self.basis.shape[3]), dtype=dtype)[None])
+        self.register_buffer('basis', torch.tensor(basis[None], dtype=dtype, requires_grad=False))
+        self.register_buffer('scaler', torch.ones((self.basis.shape[1], self.basis.shape[3]), dtype=dtype, requires_grad=False)[None])
     
     def _generate_coefficients(
         self,
@@ -206,7 +206,7 @@ class BasisEncoder(nn.Module):
         device = list(self.parameters())[0].device
         dtype = list(self.parameters())[0].dtype
         standardization = get_standardization_factor(coefficients, static_args)
-        self.scaler = torch.tensor(standardization, dtype, device)
+        self.scaler = torch.tensor(standardization, dtype=dtype, device=device)
         
     def forward(self, x):
         return torch.einsum('bij, bijk -> bik', x, self.basis) * self.scaler

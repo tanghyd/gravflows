@@ -53,6 +53,7 @@ def tensorboard_writer(
     queue: mp.Queue,
     log_dir: str,
     parameters: List[str],
+    labels: List[str],
 ):
     if log_dir is None:
         tb = SummaryWriter()
@@ -60,8 +61,10 @@ def tensorboard_writer(
         tb = SummaryWriter(log_dir)
 
     # bilby setup - specify the output directory and the name of the bilby run
-    outdir = '../gravflows/bilby_runs/GW150914'
-    result = bilby.result.read_in_result(outdir=outdir, label='GW150914')
+    result = bilby.result.read_in_result(
+        outdir='../gravflows/bilby_runs/GW150914',
+        label='GW150914'
+    )
 
     bilby_parameters = [
         'mass_1', 'mass_2', 'phase', 'geocent_time',
@@ -70,34 +73,16 @@ def tensorboard_writer(
     ]
     bilby_samples = result.posterior[bilby_parameters].values
 
-    # Shift the time of coalescence by the trigger time
+    # # Shift the time of coalescence by the trigger time
     bilby_samples[:,3] = bilby_samples[:,3] - Merger('GW150914').time
 
     bilby_df = pd.DataFrame(bilby_samples.astype(np.float32), columns=bilby_parameters)
     bilby_df = bilby_df.rename(columns={'luminosity_distance': 'distance', 'geocent_time': 'time'})
     bilby_df = bilby_df.loc[:, parameters]
     
-    domain = [
-        [25, 60],  # mass 1
-        [15, 50],  # mass 2
-        [0, 2*np.pi],  # phase 
-        [0,1],  # a_1
-        [0,1],  # a 2
-        [0,np.pi],  # tilt 1
-        [0,np.pi],  # tilt 2
-        [0, 2*np.pi],  # phi_12
-        [0, 2*np.pi],  # phi_jl
-        [0,np.pi],  # theta_jn
-        [0,np.pi],  # psi
-        [0.4,3.4],  # ra
-        [-np.pi/2,.1],  # dec
-        [0.005,0.055],  # tc
-        [100,800],  # distance
-    ]
-
     # domain = [
-    #     [30,55],  # mass 1
-    #     [20,45],  # mass 2
+    #     [25, 60],  # mass 1
+    #     [15, 50],  # mass 2
     #     [0, 2*np.pi],  # phase 
     #     [0,1],  # a_1
     #     [0,1],  # a 2
@@ -107,11 +92,29 @@ def tensorboard_writer(
     #     [0, 2*np.pi],  # phi_jl
     #     [0,np.pi],  # theta_jn
     #     [0,np.pi],  # psi
-    #     [0.6,3.2],  # ra
+    #     [0.4,3.4],  # ra
     #     [-np.pi/2,.1],  # dec
-    #     [0.015,0.045],  # tc
+    #     [0.005,0.055],  # tc
     #     [100,800],  # distance
     # ]
+
+    domain = [
+        [30,55],  # mass 1
+        [20,45],  # mass 2
+        [0, 2*np.pi],  # phase 
+        [0,1],  # a_1
+        [0,1],  # a 2
+        [0,np.pi],  # tilt 1
+        [0,np.pi],  # tilt 2
+        [0, 2*np.pi],  # phi_12
+        [0, 2*np.pi],  # phi_jl
+        [0,np.pi],  # theta_jn
+        [0,np.pi],  # psi
+        [0.6,3.2],  # ra
+        [-np.pi/2,.1],  # dec
+        [0.015,0.045],  # tc
+        [100,800],  # distance
+    ]
 
     cosmoprior = bilby.gw.prior.UniformSourceFrame(
         name='luminosity_distance',
@@ -121,7 +124,7 @@ def tensorboard_writer(
 
     while True:
         try:
-            epoch, scalars, samples, labels = queue.get()
+            epoch, scalars, samples = queue.get()
             
             for key, value in scalars.items():
                 tb.add_scalar(key, value, epoch)
@@ -172,7 +175,7 @@ def train_distributed(
     verbose: bool=False,
 ):
     
-    assert (0 < interval) and (interval < epochs), "Interval must be a positive integer between 0 and epochs."
+    assert (0 < interval) and (interval <= epochs), "Interval must be a positive integer between 0 and epochs."
 
     # setup data distributed parallel training
     setup_nccl(rank, world_size)  # world size is total gpus
@@ -200,8 +203,8 @@ def train_distributed(
 
     # parameter generator and standardization
     generator = ParameterGenerator(config_files=[waveform_params_ini, projection_params_ini])
-    mean = torch.tensor(generator.statistics['mean'].values, device=device)#, dtype=torch.float32)
-    std = torch.tensor(generator.statistics['std'].values, device=device)#, dtype=torch.float32)
+    mean = torch.tensor(generator.statistics['mean'].values, device=device, dtype=torch.float32)
+    std = torch.tensor(generator.statistics['std'].values, device=device, dtype=torch.float32)
 
     # power spectral density
     ifos = ('H1', 'L1')
@@ -212,7 +215,7 @@ def train_distributed(
         queue = mp.SimpleQueue()
         tb_process = mp.Process(
             target=tensorboard_writer,
-            args=(queue, f'runs/{log_dir}', generator.parameters)
+            args=(queue, f'runs/{log_dir}', generator.parameters, generator.latex)
         )
         tb_process.start()
 
@@ -252,12 +255,13 @@ def train_distributed(
 
     # reduced basis encoder
     n = 100  # number of reduced basis elements
-    encoder = BasisEncoder(basis_dir, n)
+    encoder = BasisEncoder(basis_dir, n, dtype=torch.complex64)
     encoder.to(device)
 
     with torch.no_grad():
         # generate GW150914 reduced basis coefficients
-        gw150914 = encoder(torch.tensor(np.stack(list(event_strain.values()))[None], device=device))
+        gw150914 = torch.tensor(np.stack(list(event_strain.values()))[None], device=device, dtype=torch.complex64)
+        gw150914 = encoder(gw150914)
         gw150914 = torch.cat([gw150914.real, gw150914.imag], dim=1)
         gw150914 = gw150914.reshape(gw150914.shape[0], gw150914.shape[1]*gw150914.shape[2])
         
@@ -272,6 +276,7 @@ def train_distributed(
         extrinsics_ini=projection_params_ini,
         psd_dir=psd_dir,
         ifos=ifos,
+        downcast=True,
     )
 
     sampler = DistributedSampler(
@@ -391,8 +396,8 @@ def train_distributed(
                 } 
                 
                 # send data to async process to generate matplotlib figures
-                queue.put((epoch, scalars, parameter_samples, generator.latex))
-                # parameter_samples = None  # reset to None for epochs where there is no corner plot
+                queue.put((epoch, scalars, parameter_samples))
+                parameter_samples = None  # reset to None for epochs where there is no corner plot
 
                 if (interval != 0) and (epoch % interval == 0):
                     # save checkpoint and write computationally expensive data to tb
@@ -412,8 +417,8 @@ if __name__ == '__main__':
 
     # training settings
     parser.add_argument('--num_gpus', type=int, default=1)
-    parser.add_argument('--epochs', type=int, default=500)
-    parser.add_argument('--interval', type=int, default=100)
+    parser.add_argument('--epochs', type=int, default=10)
+    parser.add_argument('--interval', type=int, default=5)
 
     # data directories
     # parser.add_argument('-d', '--data_dir', dest='data_dir', type=str, help='The input directory to load parameter files.')
