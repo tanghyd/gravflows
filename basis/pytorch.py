@@ -1,3 +1,6 @@
+import os
+
+from pathlib import Path
 from typing import Optional, Union, Tuple, List, Dict
 from tqdm import tqdm
 from datetime import datetime
@@ -6,6 +9,11 @@ import numpy as np
 import pandas as pd
 
 import torch
+import torch.nn as nn
+
+# local imports
+from data.config import read_ini_config
+from data.noise import get_standardization_factor
 
 def basis_reconstruction(
     data: torch.Tensor,
@@ -14,7 +22,7 @@ def basis_reconstruction(
     n: Optional[int]=None,
     verbose: bool=True,
 ) -> Tuple[np.ndarray]:
-
+            
     # store results
     waveforms = []  # frequency domain waveforms
     reconstructions = []  # freq waveforms --> RB --> freq domain
@@ -114,3 +122,95 @@ def evaluate_basis_reconstruction(
         })
 
     return pd.DataFrame(statistics)
+
+class BasisEncoder(nn.Module):
+    """Custom nn.Module for SVD Reduced Basis layer.
+    
+    We implement a standardization factor to rescale basis
+    coefficients to have unit variance as per Green (2020).
+    
+    To do:
+        Investigate reduced basis details.
+        Implement lowpass filtered frequency compatibility?
+        Otherwise we can set values in bandpass region to zero.
+        When we reproject data --> RB --> data we find non-zero
+        values present in the originally lowpassed areas.
+    
+        This problem does not exist when using double precision!
+    
+    Arguments:
+        basis_file:
+            The path to the reduced basis file as a numpy array.
+        n: int
+            The number of reduced basis elements (used for truncation).
+            Must be between 0 < n <= basis.shape[0].
+    """
+    def __init__(
+        self,
+        basis_dir: Union[str, os.PathLike],
+        n: Optional[int]=None,
+    ):
+        super().__init__()
+        # load reduced basis (randomized_svd: Vh = V.T.conj())
+        self.basis_dir = Path(basis_dir)
+        basis = np.load(self.basis_dir / 'reduced_basis.npy')
+        
+        if n is not None:
+            # basis truncation
+            assert 0 < n < basis.shape[-1]
+            basis = basis[:, :, :n]
+        
+        # self.basis = nn.Parameter(torch.from_numpy(basis[None]))
+        self.register_buffer('basis', torch.from_numpy(basis[None]))
+        self.register_buffer('scaler', torch.ones((self.basis.shape[1], self.basis.shape[3]))[None])
+    
+    def _generate_coefficients(
+        self,
+        projections_file: str='projections.npy'
+    ):
+        # batch process data (especially on GPU with memory limitations)A
+        projections = np.load(self.basis_dir / projections_file, mmap_mode='r')
+        coefficients = []
+
+        chunk_size = 5000
+        chunks = int(np.ceil(len(projections) / chunk_size))
+
+        with torch.no_grad():
+            for i in range(chunks):        
+                # set up chunking indices
+                start = i * chunk_size
+                if i == chunks - 1:
+                    end = len(projections)
+                else:
+                    end = (i+1)*chunk_size
+
+                # batch matrix multiplication with pytorch
+                device = list(self.parameters())[0].device
+                waveform = torch.tensor(projections[start:end, :], device=device)
+                coefficients.append(self(waveform).cpu().numpy())
+
+        return np.concatenate(coefficients, axis=0)
+        
+    def _fit_scaler(
+        self,
+        static_args_ini: str,
+        coefficients: Optional[np.ndarray]=None,
+        projections_file: str='projections.npy',
+    ):
+        if coefficients is None:
+            coefficients = self._generate_coefficients(projections_file)
+        _, static_args = read_ini_config(static_args_ini)  # should we store args on nn.Module?
+        
+        device = list(self.parameters())[0].device
+        standardization = get_standardization_factor(coefficients, static_args)
+        self.scaler = torch.tensor(standardization, device=device)
+        
+    def forward(self, x):
+        return torch.einsum('bij, bijk -> bik', x, self.basis) * self.scaler
+                        
+    def inverse(self, x):
+        return torch.einsum(
+            'bik, bikj -> bij',
+            x/self.scaler,
+            torch.transpose(self.basis, 2, 3).conj()
+        )

@@ -29,17 +29,26 @@ class ParameterGenerator:
         self.config_files = config_files if isinstance(config_files, list) else [config_files]
         self.config_parser = WorkflowConfigParser(configFiles=self.config_files)
         
-        self.var_args, self.static_args = read_params_from_config(self.config_parser)
+        self.parameters, self.static_args = read_params_from_config(self.config_parser)
         self.constraints = read_constraints_from_config(self.config_parser)
         self.transforms = read_transforms_from_config(self.config_parser)
         self.distribution = JointDistribution(
-            self.var_args,
+            self.parameters,
             *read_distributions_from_config(self.config_parser),
             **{'constraints': self.constraints}
         )
+
+        # ensure statistics match output of self.parameters
+        self.statistics = compute_parameter_statistics({
+            parameter: self.distribution.bounds[parameter]
+            for parameter in self.parameters
+        })
         
+    @property
+    def latex(self):
+        return [get_parameter_latex_labels()[param] for param in self.parameters]
         
-    def draw(self, n: int=1, as_dataframe: bool=False) -> Union[pd.DataFrame, np.record]:
+    def draw(self, n: int=1, as_df: bool=False) -> Union[pd.DataFrame, np.record]:
         """
         Draw a sample from the joint distribution and construct a
         dictionary that maps the parameter names to the values
@@ -59,45 +68,9 @@ class ParameterGenerator:
         """
         assert n >= 1, "n must be a positive integer."
         samples = apply_transforms(self.distribution.rvs(size=n), self.transforms)
-        if as_dataframe:
+        if as_df:
             return pd.DataFrame(samples)
         return samples
-
-def generate_ordered_parameters(
-    spins: bool,
-    spins_aligned: bool,
-    inclination: bool,
-    mass_ratio: bool=False
-) -> Tuple[str]:
-    """Function genereates an ordered tuple of parameters.
-    
-    The index positions of each parameter in this list must be kept static for downstream tasks.
-
-    TO DO:
-    Remove any dependency on hard-coded positions for parameters.
-    Everything should be as key-value pairs or have automated ordering with error handling.
-    """
-    if mass_ratio:
-        parameters = ['M', 'q']
-    else:
-        parameters = ['mass_1', 'mass_2']
-        
-    parameters.extend(['phase', 'time', 'distance'])
-
-    if spins:
-        if spins_aligned:
-            parameters.extend(['chi_1', 'chi_2'])
-        else:
-            if not inclination:
-                raise Exception('Precession requires nonzero inclination.')
-            parameters.extend(['a_1', 'a_2', 'tilt_1', 'tilt_2', 'phi_12', 'phi_jl'])
-
-    if inclination:
-        parameters.extend(['theta_jn', 'psi'])
-
-    parameters.extend(['ra', 'dec'])
-    
-    return tuple(parameters)
 
 def get_parameter_latex_labels():
     """Parameter descriptions sourced from LALInference.
@@ -137,26 +110,22 @@ def get_parameter_latex_labels():
 
     )
 
-
-def compute_parameter_statistics(priors: Dict[str, pycbc.boundaries.Bounds]):
+def compute_parameter_statistics(bounds: Dict[str, pycbc.boundaries.Bounds]):
     """Compute analytical mean and standard deviations for physical parameters
     given (hard-coded) assumptions about their prior distributions.
     
-    This follows from Green and Gair (2020) where parameters are standardized
-    before being input to a neural network - see: https://arxiv.org/abs/2008.03312.
+    We use analytic expressions defined by Green and Gair https://arxiv.org/abs/2008.03312.
+    These are used to standardize parameters before being input to a neural network.
 
-    TO DO: Enable this function to be compatible with PyCBC prior .ini files.
     """
 
     statistics = pd.DataFrame(columns=['mean','std'])
     
     # Use analytic expressions
-    for param, bounds in priors.items():
-        # get bounds for prior
-        left, right = bounds.min, bounds.max
+    for param, (left, right) in bounds.items():
 
         if param == 'mass_1':
-            m2left, m2right = priors['mass_2'].min, priors['mass_2'].max
+            m2left, m2right = bounds['mass_2'].min, bounds['mass_2'].max
             mean = (
                 (
                     -3*m2left*(left + right)+ 2*(left**2 + left*right + right**2)
@@ -176,7 +145,7 @@ def compute_parameter_statistics(priors: Dict[str, pycbc.boundaries.Bounds]):
             std = np.sqrt(cov)
 
         elif param == 'mass_2':
-            m1left, m1right = priors['mass_1'].min, priors['mass_1'].max
+            m1left, m1right = bounds['mass_1'].min, bounds['mass_1'].max
             mean = ((-3*left**2 + m1left**2 + m1left*m1right + m1right**2)
                     / (3.*(-2*left + m1left + m1right)))
             cov = ((-2*(-3*left**2 + m1left**2
@@ -220,10 +189,4 @@ def compute_parameter_statistics(priors: Dict[str, pycbc.boundaries.Bounds]):
 
         statistics = statistics.append(pd.Series({'mean': mean, 'std': std}, name=param))
 
-    # TO DO - fix hard coded position compatibility with pycbc .ini config files
-    reordered_params = [
-        'mass_1', 'mass_2', 'phase', 'a_1', 'a_2', 'tilt_1', 'tilt_2', 'phi_12',
-        'phi_jl', 'theta_jn', 'psi', 'ra', 'dec', 'time', 'distance'
-    ]
-
-    return statistics.loc[reordered_params]
+    return statistics

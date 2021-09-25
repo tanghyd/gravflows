@@ -5,6 +5,43 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 
+def chunked_projection(
+    data: np.ndarray,
+    basis: np.ndarray,
+    chunk_size: int=2500,
+    n: Optional[int]=None,
+    verbose: bool=True,
+) -> np.ndarray:
+
+    # store results
+    coefficients = []
+    
+    # specify n for basis truncation
+    if n is not None:
+        assert 1 <= n <= basis.shape[1], f"n must be 1 <= n <= {basis.shape[1]}"
+    else:
+        n = basis.shape[1]  # no truncation
+
+    # batch process data (especially on GPU with memory limitations)
+    chunks = int(np.ceil(len(data) / chunk_size))
+    desc=f"[{datetime.now().strftime('%H:%M:%S')}] CPU: Reconstructing {n} basis elements"
+    with tqdm(total=data.shape[0], desc=desc, disable=not verbose) as progress:
+        for i in range(chunks):        
+            # set up chunking indices
+            start = i * chunk_size
+            if i == chunks - 1:
+                end = len(data)
+            else:
+                end = (i+1)*chunk_size
+                
+            # batch matrix multiplication
+            waveform = data[start:end, :]
+            coefficients.append((waveform @ basis[:, :n]))
+
+            progress.update(end - start)
+
+    return np.concatenate(coefficients, axis=0)
+    
 def basis_reconstruction(
     data: np.ndarray,
     basis: np.ndarray,

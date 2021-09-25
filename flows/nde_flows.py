@@ -1,6 +1,10 @@
-from nflows import distributions, flows, transforms, data
+from typing import Union, Optional
+import numpy as np
 import torch
 from torch.nn import functional as F
+
+from nflows import distributions, flows, transforms, utils
+
 import nflows.nn.nets as nn_
 
 
@@ -91,7 +95,7 @@ def create_base_transform(i,
 
     if base_transform_type == 'rq-coupling':
         return transforms.PiecewiseRationalQuadraticCouplingTransform(
-            mask=data.create_alternating_binary_mask(
+            mask=utils.create_alternating_binary_mask(
                 param_dim, even=(i % 2 == 0)),
             transform_net_create_fn=(lambda in_features, out_features:
                                     nn_.ResidualNet(
@@ -389,9 +393,17 @@ def test_epoch(flow, test_loader, epoch, device=None, add_noise=True,
         return test_loss
 
 
-def obtain_samples(flow, y, nsamples, device=None, batch_size=512):
+def sample_flow(
+    flow,
+    n: int=50000,
+    context: Optional[Union[np.ndarray, torch.Tensor]]=None,
+    batch_size: int=512,
+    output_device: Union[str, torch.device]='cpu',
+):
     """Draw samples from the posterior.
-
+    
+    The nsf package concatenates on the wrong dimension (dim=0 instead of dim=1).
+        
     Arguments:
         flow {Flow} -- NSF model
         y {array} -- strain data
@@ -404,22 +416,26 @@ def obtain_samples(flow, y, nsamples, device=None, batch_size=512):
     Returns:
         Tensor -- samples
     """
-
+    single_batch = len(context.shape) == 1
     with torch.no_grad():
-        flow.eval()
+        if context is not None:
+            if not isinstance(context, torch.Tensor):
+                context = torch.from_numpy(context)
+            if single_batch:
+                # if 1 context tensor provided, unsqueeze batch dim
+                context = context.unsqueeze(0)
 
-        y = torch.from_numpy(y).unsqueeze(0).to(device)
+        num_batches = n // batch_size
+        num_leftover = n % batch_size
 
-        num_batches = nsamples // batch_size
-        num_leftover = nsamples % batch_size
-
-        samples = [flow.sample(batch_size, y) for _ in range(num_batches)]
+        samples = [flow.sample(batch_size, context).to(output_device) for _ in range(num_batches)]
         if num_leftover > 0:
-            samples.append(flow.sample(num_leftover, y))
+            samples.append(flow.sample(num_leftover, context).to(output_device))
 
-        # The batching in the nsf package seems screwed up, so we had to do it
-        # ourselves, as above. They are concatenating on the wrong axis.
 
-        # samples = flow.sample(nsamples, context=y, batch_size=batch_size)
+        samples = torch.cat(samples, dim=1)
+        
+        if single_batch:
+            return samples[0]
 
-        return torch.cat(samples, dim=1)[0]
+        return samples

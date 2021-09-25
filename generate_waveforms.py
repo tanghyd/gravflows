@@ -1,5 +1,5 @@
 import os
-import json
+import shutil
 import argparse
 
 # TO DO: Implement logging over print statements
@@ -26,7 +26,10 @@ from pycbc.types.frequencyseries import FrequencySeries
 
 # local imports
 from data.config import read_ini_config
-from data.noise import load_psd_from_file, frequency_noise_from_psd
+from data.noise import (
+    load_psd_from_file, frequency_noise_from_psd,
+    get_noise_std_from_static_args
+)
 from data.waveforms import (
     generate_intrinsic_waveform,
     batch_project, get_sample_frequencies,
@@ -46,22 +49,16 @@ def validate_waveform(
     # Generate waveform
     assert waveform.shape[0] == 2, "First dimension of waveform sample must be 2 (+ and x polarizations)."
     assert waveform.shape[1] == static_args['fd_length'], "Waveform length not expected given provided static_args."
+    
     hp, hc = waveform
     plus = FrequencySeries(hp, delta_f=static_args['delta_f'], copy=True)
     cross = FrequencySeries(hc, delta_f=static_args['delta_f'], copy=True)
-
-    # time shift - should we do this when we create the waveform?
-    # plus = plus.cyclic_time_shift(static_args['seconds_before_event'])
-    # cross = cross.cyclic_time_shift(static_args['seconds_before_event'])
-    # plus._epoch += static_args['seconds_before_event']
-    # cross._epoch += static_args['seconds_before_event']
-
+    
     # ifft to time domain
     sp = plus.to_timeseries(delta_t=static_args['delta_t'])
     sc = cross.to_timeseries(delta_t=static_args['delta_t'])
 
     # plot plus / cross polarizations
-    # we use a different colour palette to prevent confusion with interoferometers H1 and L1
     fig, ax = plt.subplots(nrows=1, ncols=1, figsize=(16, 4))
     ax.plot(sp.sample_times, sp, label='Plus', color='tab:pink')  # pink for plus
     ax.plot(sc.sample_times, sc, label='Cross', color='tab:cyan')  # cyan for cross
@@ -71,8 +68,6 @@ def validate_waveform(
         
     aux_desc='' if name is None else f' ({name})'
     ax.set_title(f"IFFT of Simulated {static_args['approximant']} Waveform Polarizations{aux_desc}", fontsize=14)
-    # ax.set_xlim(-0.5, 0.5)  #  should be configured by static_args
-    # ax.set_ylim(-1.25e-20, 1.25e-20)
     ax.legend(loc='upper left')
 
     fig.tight_layout()
@@ -108,23 +103,11 @@ def validate_projections(
         strain = h.to_timeseries(delta_t=static_args['delta_t'])
         ax.plot(strain.sample_times, strain, label=label, alpha=0.6)
         
-    # ax.set_xlim(-0.5, 0.5)
-    # ax.set_ylim(-1.25e-20, 1.25e-20)
     ax.set_ylabel('Strain')
     ax.set_xlabel('Time (s)')
     ax.grid('both')
     ax.legend(loc='upper left')
-        
-    # place a text box in upper left in axes coords
-    # textstr = '$\mathrm{ra}=%.2f$\n$\mathrm{dec}=%.2f$\n$d_L=%.2f$'%(
-    #     extrinsic.ra, extrinsic.dec, extrinsic.distance
-    # )
 
-    # # these are matplotlib.patch.Patch properties
-    # props = dict(alpha=0.5, facecolor='wheat')
-    # ax.text(0.905, 0.92, textstr, transform=ax.transAxes, fontsize=14,
-    #         verticalalignment='top', bbox=props)
-        
     aux_desc='' if name is None else f' ({name})'
     fig.suptitle(f"IFFT of Simulated {static_args['approximant']} Projected Waveforms at Interferometers{aux_desc}", fontsize=16) 
     fig.tight_layout()
@@ -137,6 +120,7 @@ def generate_waveform_dataset(
     params_file: str='parameters.csv',
     ifos: Optional[List[str]]=None,
     add_noise: bool=False,
+    gaussian: bool=False,
     psd_dir: Optional[str]=None,
     whiten: bool=True,
     bandpass: bool=True,
@@ -192,9 +176,10 @@ def generate_waveform_dataset(
     if metadata:
         # load static_args.ini and save as .json in dataset
         in_args_path = Path(static_args_ini)
-        out_args_path = out_dir / f'{in_args_path.stem}.json'
-        with open(out_args_path, 'w') as f:
-            json.dump(static_args, f)
+        config_dir = out_dir / 'config_files'
+        config_dir.mkdir(exist_ok=True)
+        out_args_path = config_dir / in_args_path.name
+        shutil.copy(in_args_path, out_args_path)
 
     # specify precision of output waveforms
     dtype = np.complex128 if not downcast else np.complex64
@@ -206,7 +191,7 @@ def generate_waveform_dataset(
             assert extrinsic in parameters.columns, f"{extrinsic} not in {required_extrinsics}."
 
         detectors = {ifo: Detector(ifo) for ifo in ifos}
-        waveform_desc = f'projected ({ifos})'
+        waveform_desc = f'({ifos})'
         sample_frequencies = get_sample_frequencies(
             f_final=static_args['f_final'],
             delta_f=static_args['delta_f']
@@ -229,10 +214,20 @@ def generate_waveform_dataset(
             shape=(n_samples, len(ifos), static_args['fd_length'])
         )
 
+        if add_noise:
+            # noise_std = get_noise_std_from_static_args(static_args)
+            noise_file = out_dir / 'noise.npy'
+            noise_memmap = open_memmap(
+                filename=noise_file,
+                mode='w+',  # create or overwrite file
+                dtype=dtype,
+                shape=(n_samples, len(ifos), static_args['fd_length'])
+            )
+
     else:
         # plus and cross polarizations
         detectors = None
-        waveform_desc = 'intrinsic'
+        waveform_desc = '(intrinsic)'
         sample_frequencies = None  # only used for projected time shifts
         projections_only = False
 
@@ -251,7 +246,7 @@ def generate_waveform_dataset(
         waveforms = np.empty((chunk_size, 2, static_args['fd_length']), dtype=dtype)
 
         # loop through samples at approx. 10GB at a time and append to numpy array
-        progress_desc = f"[{datetime.now().strftime('%H:%M:%S')}] Generating {static_args['approximant']} {waveform_desc} waveforms with {workers} workers"
+        progress_desc = f"[{datetime.now().strftime('%H:%M:%S')}] Generating {static_args['approximant']} {waveform_desc} waveforms"
         saved = 0  # track number of saved arrays for progrss bar
         with tqdm(desc=progress_desc, total=n_samples, miniters=1, postfix={'saved': saved}, disable=not verbose) as progress:
             for i in range(chunks):
@@ -288,33 +283,39 @@ def generate_waveform_dataset(
                 if detectors is not None:
                     # output should be (batch, ifo, length)
                     projections = np.empty((end - start, len(ifos), static_args['fd_length']), dtype=dtype)
+                    if add_noise:
+                        noise = np.empty((end - start, len(ifos), static_args['fd_length']), dtype=dtype)
                     
                     for i, ifo in enumerate(ifos):
                         # batch project for each detector
-                        projection = batch_project(detectors[ifo], samples, waveforms, static_args, sample_frequencies)
+                        projections[:, i, :] = batch_project(detectors[ifo], samples, waveforms, static_args, sample_frequencies)
                         
                         if add_noise:
-                            if psd_dir is None:
+                            if gaussian or psd_dir is None:
                                 # gaussian white noise in frequency domain
                                 size = (end-start, static_args['fd_length'])  # gaussian for each batch for each freq bin
-                                noise = (np.random.normal(0., 1., size) + 1j*np.random.normal(0., 1., size)).astype(dtype)
+                                noise[:, i, :] = (np.random.normal(0., 1., size) + 1j*np.random.normal(0., 1., size)).astype(dtype)
                             else:
                                 # coloured noise from psd -- cut to fd_length (bandpass filter for higher frequencies)
-                                noise = frequency_noise_from_psd(psds[ifo], n=end-start)[:, :static_args['fd_length']]
-                            
-                            projection += noise
+                                noise[:, i, :] = frequency_noise_from_psd(psds[ifo], n=end-start)[:, :static_args['fd_length']]
                         
+                        if whiten:
+                            projections[:, i, :] /= psds[ifo][:static_args['fd_length']] ** 0.5
+                            if add_noise:
+                                noise[:, i, :] /= psds[ifo][:static_args['fd_length']] ** 0.5
+
                         if bandpass:
                             # filter out values less than f_lower (e.g. 20Hz) - to do: check truncation vs. zeroing
-                            projection[:, :int(static_args['f_lower'] / static_args['delta_f'])] = 0.0
+                            projections[:, i, :int(static_args['f_lower'] / static_args['delta_f'])] = 0.0
+                            if add_noise:
+                                noise[:, i, :int(static_args['f_lower'] / static_args['delta_f'])] = 0.0
 
-                        if whiten:
-                            projection /= psds[ifo][:static_args['fd_length']] ** 0.5
-                            
-                        projections[:, i, :] = projection
+                    if add_noise:
+                        noise_memmap[start:end, :, :] = noise
+                        projections += noise
 
-                    projection_memmap[start:end, :, :] = projections 
-
+                    projection_memmap[start:end, :, :] = projections
+                    
                 if not projections_only:
                     waveform_memmap[start:end, :, :] = waveforms
 
@@ -346,6 +347,7 @@ if __name__ == '__main__':
     # to do: add functionality to save noise so we can reconstruct original waveform in visualisations, training, etc.
 
     # signal processing
+    parser.add_argument('--gaussian', default=False, action="store_true", help="Whether to generate white gaussian nois when add_noise is True. If False, coloured noise is generated from a PSD.")
     parser.add_argument('--whiten', default=False, action="store_true", help="Whether to whiten the data with the provided PSD before fitting a reduced basis.")
     parser.add_argument('--bandpass', default=False, action="store_true", help="Whether to truncate the frequency domain data below 'f_lower' specified in the static args.")
 

@@ -5,9 +5,12 @@
 # # env DATASET_DIR=/fred/oz016/datasets/ bash generate_datasets.sh
 # # then we set it to be a default path
 
-dataset_dir=${DATASET_DIR:-"/mnt/datahole/daniel/gravflows/datasets"}
-# dataset_dir=${DATASET_DIR:-"datasets"}
-echo "Saving datasets to ${dataset_dir}/" 
+# dataset_dir=${DATASET_DIR:-"/mnt/datahole/daniel/gravflows/datasets"}
+dataset_dir=${DATASET_DIR:-"datasets"}
+echo "Saving datasets to ${dataset_dir}/"
+
+# timer
+SECONDS=0
 
 # training data set
 python generate_parameters.py \
@@ -28,7 +31,7 @@ python generate_parameters.py \
 
 # validation data set
 python generate_parameters.py \
-    -n 1000 \
+    -n 10000 \
     -d "${dataset_dir}/validation/" \
     -c config_files/intrinsics.ini \
     -c config_files/extrinsics.ini \
@@ -37,7 +40,7 @@ python generate_parameters.py \
 
 # test data set
 python generate_parameters.py \
-    -n 1000 \
+    -n 10000 \
     -d "${dataset_dir}/test/" \
     -c config_files/intrinsics.ini \
     -c config_files/extrinsics.ini \
@@ -82,8 +85,10 @@ do
             -d "${dataset_dir}/${partition}/" \
             -s config_files/static_args.ini \
             --psd_dir "${dataset_dir}/${partition}/PSD/" \
-            --projections_only \
             --ifos "H1" "L1" \
+            --bandpass \
+            --whiten \
+            --projections_only \
             --overwrite \
             --verbose \
             --validate \
@@ -95,12 +100,8 @@ do
         python generate_reduced_basis.py \
             -n 1000 \
             -d "${dataset_dir}/${partition}/" \
-            -p "${dataset_dir}/${partition}/PSD" \
             -s config_files/static_args.ini \
             -f reduced_basis.npy \
-            --ifos "H1" "L1" \
-            --bandpass \
-            --whiten \
             --overwrite \
             --verbose \
             --validate \
@@ -111,7 +112,9 @@ do
             -d "${dataset_dir}/${partition}/" \
             -s config_files/static_args.ini \
             --psd_dir "${dataset_dir}/${partition}/PSD/" \
+            --ifos "H1" "L1" \
             --add_noise \
+            --gaussian \
             --bandpass \
             --whiten \
             --projections_only \
@@ -119,7 +122,6 @@ do
             --verbose \
             --validate \
             --metadata \
-            --ifos "H1" "L1" \
             --chunk_size 5000 \
             --workers 12
     fi
@@ -128,4 +130,24 @@ done
 
 
 # # to do:
-# # print out size of saved datasets in MB?
+# print out size of saved datasets in MB
+
+# print out size of datasets
+for partition in "train" "basis" "validation" "test"
+do
+    echo "$(du -sh ${dataset_dir}/${partition}/)"
+done
+
+# print out runtime
+if (( $SECONDS > 3600 )) ; then
+    let "hours=SECONDS/3600"
+    let "minutes=(SECONDS%3600)/60"
+    let "seconds=(SECONDS%3600)%60"
+    echo "Completed in $hours hour(s), $minutes minute(s) and $seconds second(s)."
+elif (( $SECONDS > 60 )) ; then
+    let "minutes=(SECONDS%3600)/60"
+    let "seconds=(SECONDS%3600)%60"
+    echo "Completed in $minutes minute(s) and $seconds second(s)."
+else
+    echo "Completed in $SECONDS seconds."
+fi

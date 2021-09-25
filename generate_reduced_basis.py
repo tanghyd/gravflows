@@ -1,5 +1,4 @@
 import argparse
-import json
 import time
 
 from pathlib import Path
@@ -13,9 +12,8 @@ from sklearn.utils.extmath import randomized_svd
 
 # local imports
 from data.config import read_ini_config
-from data.noise import load_psd_from_file
 
-# TO DO: Implement logging over print statements
+# TO DO: Implement logging instead of print statements
 # import logging
 
 def fit_reduced_basis(
@@ -73,17 +71,19 @@ def fit_reduced_basis(
             print(f"[{datetime.now().strftime('%H:%M:%S')}] Finished {ifo} in {round(end-start, 4)}s.")
 
         if validate:
-            validation_file = out_dir / f'{ifo}_reconstruction.csv'
+            basis_dir = out_dir / 'reconstruction'
+            basis_dir.mkdir(exist_ok=True)
+            interval = 200
             if cuda:
                 from basis.pytorch import evaluate_basis_reconstruction
                 # GPU matrix multiplication is fast enough to try multiple basis truncations
-                statistics = evaluate_basis_reconstruction(data, Vh.T.conj(), cuda, n=list(range(100, num_basis+1, 100)))
+                statistics = evaluate_basis_reconstruction(data, Vh.T.conj(), cuda, n=list(range(200, num_basis+1, interval)))
             else:
                 from basis import evaluate_basis_reconstruction
-                statistics = evaluate_basis_reconstruction(data, Vh.T.conj(), n=list(range(100, num_basis+1, 100)))
+                statistics = evaluate_basis_reconstruction(data, Vh.T.conj(), n=list(range(200, num_basis+1, interval)))
             
             # to do: consider better approach to store statistical results
-            statistics.to_csv(validation_file, index=False)
+            statistics.to_csv(basis_dir / f'{ifo}_reconstruction.csv', index=False)
 
 
 if __name__ == '__main__':
@@ -96,7 +96,6 @@ if __name__ == '__main__':
 
     # data directories
     parser.add_argument('-d', '--data_dir', default='datasets/basis', dest='data_dir', type=str, help='The output directory to load generated waveform files.')
-    parser.add_argument('-p', '--psd_dir', default='datasets/basis/PSD', dest='psd_dir', type=str, help='The output directory to load generated PSD files.')
     parser.add_argument('-o', '--out_dir', dest='out_dir', type=str, help='The output directory to save generated reduced basis files.')
     parser.add_argument('-f', '--file_name', default='parameters.csv', dest='file_name', type=str, help='The output .csv file name to save the generated parameters.')
     parser.add_argument('--overwrite', default=False, action="store_true", help="Whether to overwrite files if they already exists.")

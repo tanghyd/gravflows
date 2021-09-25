@@ -1,6 +1,5 @@
-import os
+import shutil
 import argparse
-import logging
 
 from pathlib import Path
 from typing import List, Union
@@ -8,16 +7,8 @@ from typing import List, Union
 # local imports
 from data.parameters import ParameterGenerator
 
-# to do - put this in on repo
-def rm_tree(pth: Union[str, os.PathLike]):
-    """Recursively removes all files and folders in a directory."""
-    pth = Path(pth)
-    for child in pth.glob('*'):
-        if child.is_file():
-            child.unlink()
-        else:
-            rm_tree(child)
-    pth.rmdir()
+# TO DO: Implement logging instead of print statements
+# import logging
 
 def generate_parameters(
     n: int,
@@ -51,23 +42,22 @@ def generate_parameters(
     # specify output directory and file
     data_dir = Path(data_dir)
     assert not data_dir.is_file(), f"{data_dir} is a file. It should either not exist or be a directory."
-    if overwrite and data_dir.is_dir(): rm_tree(data_dir)  # recursively delete directory -- does not remove parents if nested
+    if overwrite and data_dir.is_dir():
+        shutil.rmtree(data_dir)  # does not remove parents if nested
     data_dir.mkdir(parents=True, exist_ok=True)
-    
-    # if not overwrite:
-    #     assert not csv_path.is_file(), f"{csv_path} exists but argument overwrite is set to False."
         
     # generate intrinsic parameters
     generator = ParameterGenerator(config_files=config_files, seed=None)
-    parameters = generator.draw(n, as_dataframe=True)
+    parameters = generator.draw(n, as_df=True)
     
     # save parameters and metadata
     csv_path = data_dir / file_name  # filename should include .csv extension
-    parameters.to_csv(csv_path, index_label='index')
+    parameters.to_csv(data_dir / file_name, index_label='index')
     if metadata:
-        with open(data_dir / f'{csv_path.stem}.ini', 'w') as file:
+        config_dir = data_dir / 'config_files'
+        config_dir.mkdir(exist_ok=True)
+        with open(config_dir / f'{csv_path.stem}.ini', 'w') as file:
             generator.config_parser.write(file)
-
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Arguments for parameter generation code.')

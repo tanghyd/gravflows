@@ -30,7 +30,19 @@ def get_tukey_window(
     length = int(window_duration * sampling_rate)
     return tukey(length, alpha)
 
-def get_noise_std(window_factor, delta_f):
+# def get_noise_std(window_factor, delta_f):
+#     """Standard deviation of the whitened noise distribution.
+#     To have noise that comes from a multivariate *unit* normal
+#     distribution, you must divide by this factor.
+    
+#     In practice, this means dividing the whitened waveforms by this factor.
+    
+#     In the continuum limit in time domain, the standard deviation of white
+#     noise would at each point go to infinity, hence the delta_t factor.
+#     """
+#     return np.sqrt(window_factor) / np.sqrt(4.0 * delta_f)
+
+def get_noise_std_from_static_args(static_args):
     """Standard deviation of the whitened noise distribution.
     To have noise that comes from a multivariate *unit* normal
     distribution, you must divide by this factor.
@@ -40,23 +52,23 @@ def get_noise_std(window_factor, delta_f):
     In the continuum limit in time domain, the standard deviation of white
     noise would at each point go to infinity, hence the delta_t factor.
     """
-    return np.sqrt(window_factor) / np.sqrt(4.0 * delta_f)
-
-def get_standardization_factor(basis: np.ndarray, static_args: Dict[str, float]):
-    """ Given a whitened noisy waveform, we want to rescale each component to
-    # have unit variance. This is to improve neural network training. The mean
-    # should already be zero. - Green
-    """
-    # estimate noise standardization for reduced basis given windowed data
     tukey_window = get_tukey_window(static_args['sample_length'], static_args['target_sampling_rate'])
     window_factor = np.sum(tukey_window ** 2)
     window_factor /= (static_args['sample_length'] * static_args['target_sampling_rate'])
-    noise_std = get_noise_std(window_factor=window_factor, delta_f=static_args['delta_f'])
+    return np.sqrt(window_factor) / np.sqrt(4.0 * static_args['delta_f'])
+
+def get_standardization_factor(coefficients: np.ndarray, static_args: Dict[str, float]):
+    """ Given a whitened noisy waveform, we want to rescale each component to
+    have unit variance. This is to improve neural network training. The mean
+    should already be zero. - Green
+    """
+    # estimate noise standardization for reduced basis given windowed data
+    noise_std = get_noise_std_from_static_args(static_args['delta_f'])
     
     # Standard deviation of data.
     # Divide by sqrt(2) because we want real
     # and imaginary parts to have unit standard deviation.
-    std = np.std(basis, axis=0) / np.sqrt(2)
+    std = np.std(coefficients, axis=0) / np.sqrt(2)
     return 1 / np.sqrt(std**2 + noise_std**2)
 
 def frequency_noise_from_psd(
@@ -89,7 +101,6 @@ def frequency_noise_from_psd(
     sigma = 0.5 * (psd / psd.delta_f) ** (0.5)
     if seed is not None: np.random.seed(seed)
     sigma = sigma.numpy()
-    dtype = complex_same_precision_as(psd)
 
     not_zero = (sigma != 0)
 
@@ -101,7 +112,7 @@ def frequency_noise_from_psd(
     noise_co = np.random.normal(loc=0, scale=sigma_red, size=size)
     noise_red = noise_re + 1j * noise_co
 
-    noise = np.zeros((n, len(sigma)), dtype=dtype)
+    noise = np.zeros((n, len(sigma)), dtype=complex_same_precision_as(psd))
     noise[:, not_zero] = noise_red
 
     return noise

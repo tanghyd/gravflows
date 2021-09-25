@@ -15,8 +15,8 @@ from pycbc.catalog import Merger
 from data.config import read_ini_config
 from data.noise import NoiseTimeline, get_tukey_window
 
-# TO DO: Implement logging over print statements
-import logging
+# TO DO: Implement logging instead of print statements
+# import logging
 
 # TO DO: Better incorporate gps time selection
 # gps_time = int(Merger('GW150914').time + 2 - psd_window - static_args['waveform_length'])
