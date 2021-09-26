@@ -80,27 +80,9 @@ def tensorboard_writer(
     bilby_df = bilby_df.rename(columns={'luminosity_distance': 'distance', 'geocent_time': 'time'})
     bilby_df = bilby_df.loc[:, parameters]
     
-    # domain = [
-    #     [25, 60],  # mass 1
-    #     [15, 50],  # mass 2
-    #     [0, 2*np.pi],  # phase 
-    #     [0,1],  # a_1
-    #     [0,1],  # a 2
-    #     [0,np.pi],  # tilt 1
-    #     [0,np.pi],  # tilt 2
-    #     [0, 2*np.pi],  # phi_12
-    #     [0, 2*np.pi],  # phi_jl
-    #     [0,np.pi],  # theta_jn
-    #     [0,np.pi],  # psi
-    #     [0.4,3.4],  # ra
-    #     [-np.pi/2,.1],  # dec
-    #     [0.005,0.055],  # tc
-    #     [100,800],  # distance
-    # ]
-
     domain = [
-        [30,55],  # mass 1
-        [20,45],  # mass 2
+        [25, 60],  # mass 1
+        [15, 50],  # mass 2
         [0, 2*np.pi],  # phase 
         [0,1],  # a_1
         [0,1],  # a 2
@@ -110,11 +92,29 @@ def tensorboard_writer(
         [0, 2*np.pi],  # phi_jl
         [0,np.pi],  # theta_jn
         [0,np.pi],  # psi
-        [0.6,3.2],  # ra
+        [0.4,3.4],  # ra
         [-np.pi/2,.1],  # dec
-        [0.015,0.045],  # tc
+        [0.005,0.055],  # tc
         [100,800],  # distance
     ]
+
+    # domain = [
+    #     [30,55],  # mass 1
+    #     [20,45],  # mass 2
+    #     [0, 2*np.pi],  # phase 
+    #     [0,1],  # a_1
+    #     [0,1],  # a 2
+    #     [0,np.pi],  # tilt 1
+    #     [0,np.pi],  # tilt 2
+    #     [0, 2*np.pi],  # phi_12
+    #     [0, 2*np.pi],  # phi_jl
+    #     [0,np.pi],  # theta_jn
+    #     [0,np.pi],  # psi
+    #     [0.6,3.2],  # ra
+    #     [-np.pi/2,.1],  # dec
+    #     [0.015,0.045],  # tc
+    #     [100,800],  # distance
+    # ]
 
     cosmoprior = bilby.gw.prior.UniformSourceFrame(
         name='luminosity_distance',
@@ -124,42 +124,52 @@ def tensorboard_writer(
 
     while True:
         try:
-            epoch, scalars, samples = queue.get()
+            epoch, scalars, figures = queue.get()
             
             for key, value in scalars.items():
                 tb.add_scalar(key, value, epoch)
             
-            if samples is not None:
-                assert isinstance(samples, torch.Tensor)
-                samples_df = pd.DataFrame(samples.numpy(), columns=parameters)
-                
-                weights = cosmoprior.prob(samples_df['distance'])
-                weights = weights / np.mean(weights)
+            if figures is not None:
+                for key, value in figures.items():
+                    assert isinstance(value, torch.Tensor)
+                    
+                    if key == 'posteriors/gw150914':
+                        samples_df = pd.DataFrame(value.numpy(), columns=parameters)
+                        
+                        weights = cosmoprior.prob(samples_df['distance'])
+                        weights = weights / np.mean(weights)
 
-                fig = corner.corner(
-                    bilby_df,
-                    levels=[0.5, 0.9],
-                    scale_hist=True,
-                    plot_datapoints=False,
-                    labels=labels,
-                    color='red',
-                )
+                        fig = corner.corner(
+                            bilby_df,
+                            levels=[0.5, 0.9],
+                            scale_hist=True,
+                            plot_datapoints=False,
+                            labels=labels,
+                            color='red',
+                        )
 
-                corner.corner(
-                    samples_df,
-                    levels=[0.5, 0.9],
-                    scale_hist=True,
-                    plot_datapoints=False,
-                    labels=labels,
-                    show_titles=True,
-                    fontsize=18,
-                    fig=fig,
-                    range=domain,
-                    weights=weights * len(bilby_samples) / len(samples_df),
-                )
+                        corner.corner(
+                            samples_df,
+                            levels=[0.5, 0.9],
+                            scale_hist=True,
+                            plot_datapoints=False,
+                            labels=labels,
+                            show_titles=True,
+                            fontsize=18,
+                            fig=fig,
+                            range=domain,
+                            weights=weights * len(bilby_samples) / len(samples_df),
+                        )
 
-                fig.suptitle('Gravitational Wave Parameter Estimation: NSF (black) vs. Bilby (red)', fontsize=22)
-                tb.add_figure('corner', fig, epoch)
+                        fig.suptitle('GW150914 Parameter Estimation: NSF (black) vs. Bilby (red)', fontsize=22)
+                        tb.add_figure(key, fig, epoch)
+
+                    elif key == 'posteriors/train':
+                        pass
+            
+                    elif key == 'posteriors/validation':
+                        pass
+
             tb.flush()
 
         except Exception as e:
@@ -186,6 +196,7 @@ def train_distributed(
     noise_dir = Path('/mnt/datahole/daniel/gwosc/O1')
     psd_dir = Path("/mnt/datahole/daniel/gravflows/datasets/train/PSD/")
     waveform_dir = Path('/mnt/datahole/daniel/gravflows/datasets/train/')
+    validation_dir = Path('/mnt/datahole/daniel/gravflows/datasets/validation/')
     basis_dir = Path('/mnt/datahole/daniel/gravflows/datasets/basis/')
     log_dir = f"{datetime.now().strftime('%b%d_%H-%M-%S')}_{os.uname().nodename}"  # tb
 
@@ -299,6 +310,37 @@ def train_distributed(
         collate_fn=dataset._collate_fn,
     )
 
+    val_dataset = WaveformDataset(
+        data_dir=validation_dir,
+        static_args_ini=static_args_ini,
+        intrinsics_ini=waveform_params_ini,
+        extrinsics_ini=projection_params_ini,
+        psd_dir=psd_dir,
+        ifos=ifos,
+        downcast=True,
+    )
+
+    val_sampler = DistributedSampler(
+        val_dataset,
+        shuffle=True,
+        num_replicas=world_size,
+        rank=rank,
+        seed=rank,
+    )
+
+    val_loader = DataLoader(
+        dataset,
+        shuffle=False,
+        num_workers=4,
+        batch_size=batch_size,
+        sampler=val_sampler,
+        pin_memory=True,
+        persistent_workers=False,
+        worker_init_fn=dataset._worker_init_fn,
+        collate_fn=dataset._collate_fn,
+    )
+
+
     # load neural spline flow model
     flow = nde_flows.create_NDE_model(
         input_dim=15, 
@@ -316,10 +358,12 @@ def train_distributed(
 
     # train
     flow = DDP(flow.to(rank), device_ids=[rank], output_device=rank)
-    optimizer = torch.optim.Adam(flow.parameters(), lr=2e-4)
+    optimizer = torch.optim.Adam(flow.parameters(), lr=5e-4)
 
     flow.train()
     train_loss = torch.zeros((1,), device=device, requires_grad=False)
+    val_loss = torch.zeros((1,), device=device, requires_grad=False)
+
 
     # tqdm progress bar
     disable = False if verbose and (rank == 0) else True
@@ -359,7 +403,7 @@ def train_distributed(
                 optimizer.step()
 
                 # total loss summed over each sample in batch
-                train_loss += loss.detach() * coefficients.shape[0]  # * 15 ??
+                train_loss += loss.detach() * coefficients.shape[0]
                 if rank == 0: progress.update(1)
 
             # gather total loss during epoch between each GPU worker as list of tensors
@@ -367,11 +411,48 @@ def train_distributed(
             distributed.all_gather(world_loss, train_loss)
             train_loss *= 0.0  # reset loss for next epoch
                 
-            with torch.no_grad():
-                # validation with corner plot
+            with torch.inference_mode():
+                # validation on test set 
+                iterator = iter(val_loader)
+                projections, parameters = next(iterator)     
+                projections = projections.to(device, non_blocking=True)
+                parameters = parameters.to(device, non_blocking=True)
+        
+                complete = False
+                while not complete:
+                    optimizer.zero_grad()
+
+                    # project to reduced basis and flatten for 1-d residual network input
+                    coefficients = encoder(projections)
+                    coefficients = torch.cat([coefficients.real, coefficients.imag], dim=1)
+                    coefficients = coefficients.reshape(coefficients.shape[0], coefficients.shape[1]*coefficients.shape[2])
+
+                    # negative log-likelihood conditional on strain over mini-batch
+                    loss = -flow.module.log_prob(parameters, context=coefficients).mean()
+
+                    try:
+                        # async get data from CPU and move to GPU during model forward
+                        projections, parameters = next(iterator) 
+                        projections = projections.to(device, non_blocking=True)
+                        parameters = parameters.to(device, non_blocking=True)
+
+                    except StopIteration:
+                        # exit while loop if iterator is complete
+                        complete = True
+                
+
+                    # total loss summed over each sample in batch
+                    val_loss += loss.detach() * coefficients.shape[0]
+
+                # gather total loss during epoch between each GPU worker as list of tensors
+                world_val_loss = [torch.ones_like(val_loss) for _ in range(world_size)]
+                distributed.all_gather(world_val_loss, val_loss)
+                val_loss *= 0.0  # reset loss for next epoch
+
+                # corner
                 n_samples = 50000
                 sample_size = (n_samples // world_size, parameters.shape[-1])
-                world_samples = [
+                gw150914_samples = [
                     torch.ones(sample_size, dtype=torch.float32, device=device)
                     for _ in range(world_size)
                 ]
@@ -386,18 +467,29 @@ def train_distributed(
                 )[0]
                 samples = (samples * std) + mean
                 
-                distributed.all_gather(world_samples, samples)
-                parameter_samples = torch.cat(world_samples, dim=0).cpu()
-                
+                distributed.all_gather(gw150914_samples, samples)
+
+                # validation posteriors
+                # argmax of parameters on distance
+                # argmin of parameters on distance
+                # argmean of parameters on distance
+
+
             if rank == 0:
                 # log average epoch loss across DDP to tensorboard
                 scalars = {
-                    'loss': torch.cat(world_loss).mean().item() / len(dataloader.dataset)
+                    'loss/train': torch.cat(world_loss).mean().item() / len(dataloader.dataset),
+                    'loss/validation': torch.cat(world_val_loss).mean().item() / len(val_loader.dataset)
                 } 
                 
+                figures = {
+                    'posteriors/gw150914': torch.cat(gw150914_samples, dim=0).cpu(),
+                    # 'posteriors/validation': None,
+                }
+
                 # send data to async process to generate matplotlib figures
-                queue.put((epoch, scalars, parameter_samples))
-                parameter_samples = None  # reset to None for epochs where there is no corner plot
+                queue.put((epoch, scalars, figures))
+                figures = None  # reset to None for epochs where there is no corner plot
 
                 if (interval != 0) and (epoch % interval == 0):
                     # save checkpoint and write computationally expensive data to tb
