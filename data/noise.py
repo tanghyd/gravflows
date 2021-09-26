@@ -63,7 +63,7 @@ def get_standardization_factor(coefficients: np.ndarray, static_args: Dict[str, 
     should already be zero. - Green
     """
     # estimate noise standardization for reduced basis given windowed data
-    noise_std = get_noise_std_from_static_args(static_args['delta_f'])
+    noise_std = get_noise_std_from_static_args(static_args)
     
     # Standard deviation of data.
     # Divide by sqrt(2) because we want real

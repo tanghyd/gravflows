@@ -417,12 +417,11 @@ def sample_flow(
     Returns:
         Tensor -- samples
     """
-    single_batch = len(context.shape) == 1
     with torch.no_grad():
         if context is not None:
             if not isinstance(context, torch.Tensor):
                 context = torch.from_numpy(context)
-            if single_batch:
+            if len(context.shape) == 1:
                 # if 1 context tensor provided, unsqueeze batch dim
                 context = context.unsqueeze(0)
 
@@ -435,8 +434,5 @@ def sample_flow(
 
 
         samples = torch.cat(samples, dim=1)
-        
-        if single_batch:
-            return samples[0]
 
         return samples

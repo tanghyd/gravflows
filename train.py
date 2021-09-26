@@ -1,6 +1,7 @@
 import os
 import signal
 import traceback
+import logging
 
 from pathlib import Path
 from typing import List
@@ -12,6 +13,8 @@ from datetime import datetime, timedelta
 
 import numpy as np
 import pandas as pd
+
+import matplotlib.pyplot as plt
 
 import corner
 
@@ -48,6 +51,7 @@ def setup_nccl(rank, world_size):
 
 def cleanup_nccl():
     distributed.destroy_process_group()
+
 
 def tensorboard_writer(
     queue: mp.Queue,
@@ -98,24 +102,6 @@ def tensorboard_writer(
         [100,800],  # distance
     ]
 
-    # domain = [
-    #     [30,55],  # mass 1
-    #     [20,45],  # mass 2
-    #     [0, 2*np.pi],  # phase 
-    #     [0,1],  # a_1
-    #     [0,1],  # a 2
-    #     [0,np.pi],  # tilt 1
-    #     [0,np.pi],  # tilt 2
-    #     [0, 2*np.pi],  # phi_12
-    #     [0, 2*np.pi],  # phi_jl
-    #     [0,np.pi],  # theta_jn
-    #     [0,np.pi],  # psi
-    #     [0.6,3.2],  # ra
-    #     [-np.pi/2,.1],  # dec
-    #     [0.015,0.045],  # tc
-    #     [100,800],  # distance
-    # ]
-
     cosmoprior = bilby.gw.prior.UniformSourceFrame(
         name='luminosity_distance',
         minimum=1e2,
@@ -131,11 +117,10 @@ def tensorboard_writer(
             
             if figures is not None:
                 for key, value in figures.items():
-                    assert isinstance(value, torch.Tensor)
                     
                     if key == 'posteriors/gw150914':
+                        assert isinstance(value, torch.Tensor)
                         samples_df = pd.DataFrame(value.numpy(), columns=parameters)
-                        
                         weights = cosmoprior.prob(samples_df['distance'])
                         weights = weights / np.mean(weights)
 
@@ -164,11 +149,28 @@ def tensorboard_writer(
                         fig.suptitle('GW150914 Parameter Estimation: NSF (black) vs. Bilby (red)', fontsize=22)
                         tb.add_figure(key, fig, epoch)
 
-                    elif key == 'posteriors/train':
-                        pass
-            
-                    elif key == 'posteriors/validation':
-                        pass
+                    elif key in ('posteriors/validation', 'posteriors/test', 'posteriors/train'):
+                        assert isinstance(value, tuple)
+                        samples, ground_truth = value  # unpack a tuple
+                        samples_df = pd.DataFrame(samples.numpy(), columns=parameters)
+                        weights = cosmoprior.prob(samples_df['distance'])
+                        weights = weights / np.mean(weights)
+
+                        fig = corner.corner(
+                            samples_df,
+                            levels=[0.5, 0.9],
+                            scale_hist=True,
+                            plot_datapoints=False,
+                            labels=labels,
+                            show_titles=True,
+                            fontsize=18,
+                            # range=domain,
+                            truths=ground_truth[0].numpy(),
+                            weights=weights * len(bilby_samples) / len(samples_df),
+                        )
+                        
+                        fig.suptitle(f"{key.split('/')[-1].replace('_', ' ').title()} Validation Sample: NSF (black) vs. Bilby (red)", fontsize=22)
+                        tb.add_figure(key, fig, epoch)
 
             tb.flush()
 
@@ -181,11 +183,12 @@ def train_distributed(
     rank: int,
     world_size: int,
     epochs: int=500,
-    interval: int=100,
+    interval: int=10,
+    save: int=100,
     verbose: bool=False,
 ):
     
-    assert (0 < interval) and (interval <= epochs), "Interval must be a positive integer between 0 and epochs."
+    assert (0 <= interval) and (interval <= epochs), "Interval must be a positive integer between 0 and epochs."
 
     # setup data distributed parallel training
     setup_nccl(rank, world_size)  # world size is total gpus
@@ -195,9 +198,10 @@ def train_distributed(
     # directories
     noise_dir = Path('/mnt/datahole/daniel/gwosc/O1')
     psd_dir = Path("/mnt/datahole/daniel/gravflows/datasets/train/PSD/")
+    basis_dir = Path('/mnt/datahole/daniel/gravflows/datasets/basis/')
     waveform_dir = Path('/mnt/datahole/daniel/gravflows/datasets/train/')
     validation_dir = Path('/mnt/datahole/daniel/gravflows/datasets/validation/')
-    basis_dir = Path('/mnt/datahole/daniel/gravflows/datasets/basis/')
+    test_dir = Path('/mnt/datahole/daniel/gravflows/datasets/test/')
     log_dir = f"{datetime.now().strftime('%b%d_%H-%M-%S')}_{os.uname().nodename}"  # tb
 
     save_dir = Path('model_weights/')
@@ -264,21 +268,8 @@ def train_distributed(
         # save frequency domain waveform for values up to 1024Hz
         event_strain[ifo] = strain.to_frequencyseries(delta_f=static_args['delta_f'])[:static_args['fd_length']]
 
-    # reduced basis encoder
-    n = 100  # number of reduced basis elements
-    encoder = BasisEncoder(basis_dir, n, dtype=torch.complex64)
-    encoder.to(device)
-
-    with torch.no_grad():
-        # generate GW150914 reduced basis coefficients
-        gw150914 = torch.tensor(np.stack(list(event_strain.values()))[None], device=device, dtype=torch.complex64)
-        gw150914 = encoder(gw150914)
-        gw150914 = torch.cat([gw150914.real, gw150914.imag], dim=1)
-        gw150914 = gw150914.reshape(gw150914.shape[0], gw150914.shape[1]*gw150914.shape[2])
-        
-
     # training data set
-    batch_size = 1000
+    batch_size = 1500
 
     dataset = WaveformDataset(
         data_dir=waveform_dir,
@@ -313,8 +304,7 @@ def train_distributed(
     val_dataset = WaveformDataset(
         data_dir=validation_dir,
         static_args_ini=static_args_ini,
-        intrinsics_ini=waveform_params_ini,
-        extrinsics_ini=projection_params_ini,
+        data_file='projections.npy',
         psd_dir=psd_dir,
         ifos=ifos,
         downcast=True,
@@ -322,26 +312,81 @@ def train_distributed(
 
     val_sampler = DistributedSampler(
         val_dataset,
-        shuffle=True,
+        shuffle=False,
         num_replicas=world_size,
         rank=rank,
         seed=rank,
     )
 
     val_loader = DataLoader(
-        dataset,
+        val_dataset,
         shuffle=False,
-        num_workers=4,
+        num_workers=8,
         batch_size=batch_size,
         sampler=val_sampler,
         pin_memory=True,
         persistent_workers=False,
-        worker_init_fn=dataset._worker_init_fn,
-        collate_fn=dataset._collate_fn,
+        worker_init_fn=val_dataset._worker_init_fn,
+    )
+
+    test_dataset = WaveformDataset(
+        data_dir=test_dir,
+        static_args_ini=static_args_ini,
+        data_file='projections.npy',
+        psd_dir=psd_dir,
+        ifos=ifos,
+        downcast=True,
     )
 
 
-    # load neural spline flow model
+    # reduced basis encoder
+    n = 100  # number of reduced basis elements
+    encoder = BasisEncoder(basis_dir, n, torch.complex64)  # .pt checkpoint must be single precision
+    encoder.to(device=device)
+    encoder.load_state_dict(torch.load(basis_dir / f'basis_encoder_{n}.pt', map_location=device))
+    for param in encoder.parameters():
+        param.requires_grad = False
+    encoder.eval()
+
+    # validation data
+    if interval != 0:
+        if rank != 3:  # gpu3 will sample from training samples
+            with torch.no_grad():
+                if rank == 0:
+                    # generate samples for gw150914
+                    context = torch.tensor(np.stack(list(event_strain.values()))[None], dtype=torch.complex64, device=device)
+                    gts = torch.zeros((1,len(val_dataset.parameters.columns)), dtype=torch.float32, device=device)  # dummy tensor
+
+                elif rank == 1:
+                    idx = val_dataset.parameters.distance.argmin()
+
+                    # manually load projected waveforms and ground truths from file
+                    # this is to circumvent calling ._worker_init_fn() on the DataSet object before training
+                    context = np.load(val_dataset.data_dir / val_dataset.data_file, mmap_mode='r')[[idx]]
+                    context = torch.tensor(np.array(context), dtype=torch.complex64, device=device)
+
+                    gts = val_dataset.parameters.iloc[[idx]].values
+                    gts = torch.tensor(val_dataset.parameters.iloc[[idx]].values, dtype=torch.float32, device=device)
+
+                    # idx = val_dataset.parameters.loc[
+                    #     val_dataset.parameters.distance == val_dataset.parameters.distance.quantile(interpolation='nearest')
+                    # ].index[0]
+                
+                elif rank == 2:
+                    
+                    idx = test_dataset.parameters.distance.argmin()
+                    context = np.load(test_dataset.data_dir / test_dataset.data_file, mmap_mode='r')[[idx]]
+                    context = torch.tensor(np.array(context), dtype=torch.complex64, device=device)
+
+                    gts = test_dataset.parameters.iloc[[idx]].values
+                    gts = torch.tensor(test_dataset.parameters.iloc[[idx]].values, dtype=torch.float32, device=device)
+                    
+                # context = encoder(context)
+                context = torch.einsum('bij, bijk -> bik', context, encoder.basis) * encoder.scaler
+                context = torch.cat([context.real, context.imag], dim=1)
+                context = context.reshape(context.shape[0], context.shape[1]*context.shape[2])
+
+
     flow = nde_flows.create_NDE_model(
         input_dim=15, 
         context_dim=4*n,
@@ -355,22 +400,22 @@ def train_distributed(
     )
 
     # sync_bn_flow = nn.SyncBatchNorm.convert_sync_batchnorm(flow)
-
-    # train
     flow = DDP(flow.to(rank), device_ids=[rank], output_device=rank)
     optimizer = torch.optim.Adam(flow.parameters(), lr=5e-4)
 
+    # run training loop
     flow.train()
     train_loss = torch.zeros((1,), device=device, requires_grad=False)
     val_loss = torch.zeros((1,), device=device, requires_grad=False)
 
-
-    # tqdm progress bar
-    disable = False if verbose and (rank == 0) else True
-
-    with tqdm(total=len(dataloader)*epochs, desc='Training', disable=disable) as progress:
+    disable_pbar = False if verbose and (rank == 0) else True  # tqdm progress bar
+    with tqdm(total=len(dataloader)*epochs, disable=disable_pbar) as progress:
         for epoch in range(1, 1+epochs):
-            if rank == 0: progress.set_postfix({'epoch': epoch})
+            if rank == 0:
+                progress.set_postfix({'epoch': epoch})
+                progress.set_description(f'[{log_dir}] Training')
+                progress.refresh()
+
             iterator = iter(dataloader)
             projections, parameters = next(iterator) 
 
@@ -381,10 +426,16 @@ def train_distributed(
             while not complete:
                 optimizer.zero_grad()
 
+                # generate noise for whitened waveform above lowpass filter (i.e. >20Hz)
+                lowpass = int(dataset.static_args['f_lower'] / dataset.static_args['delta_f'])
+                size = (projections.shape[0], projections.shape[1], projections.shape[2] - lowpass)
+                projections[:, :, lowpass:] += torch.randn(size, dtype=projections.dtype, device=projections.device)
+
                 # project to reduced basis and flatten for 1-d residual network input
                 coefficients = encoder(projections)
                 coefficients = torch.cat([coefficients.real, coefficients.imag], dim=1)
                 coefficients = coefficients.reshape(coefficients.shape[0], coefficients.shape[1]*coefficients.shape[2])
+
 
                 # negative log-likelihood conditional on strain over mini-batch
                 loss = -flow.module.log_prob(parameters, context=coefficients).mean()
@@ -411,87 +462,113 @@ def train_distributed(
             distributed.all_gather(world_loss, train_loss)
             train_loss *= 0.0  # reset loss for next epoch
                 
-            with torch.inference_mode():
-                # validation on test set 
-                iterator = iter(val_loader)
-                projections, parameters = next(iterator)     
-                projections = projections.to(device, non_blocking=True)
-                parameters = parameters.to(device, non_blocking=True)
-        
-                complete = False
-                while not complete:
-                    optimizer.zero_grad()
+            if (interval != 0) and (epoch % interval == 0):
+                if rank==0:
+                    progress.set_description(f'[{log_dir}] Validating')
+                    progress.refresh()
 
-                    # project to reduced basis and flatten for 1-d residual network input
-                    coefficients = encoder(projections)
-                    coefficients = torch.cat([coefficients.real, coefficients.imag], dim=1)
-                    coefficients = coefficients.reshape(coefficients.shape[0], coefficients.shape[1]*coefficients.shape[2])
+                with torch.inference_mode():
+                    # evaluation on noisy validation set 
+                    iterator = iter(val_loader)
+                    projections, parameters = next(iterator)
+                    projections = projections.to(device, dtype=torch.complex64, non_blocking=True)
+                    parameters = parameters.to(device, dtype=torch.float32, non_blocking=True)
+            
+                    complete = False
+                    while not complete:
+                        optimizer.zero_grad()
 
-                    # negative log-likelihood conditional on strain over mini-batch
-                    loss = -flow.module.log_prob(parameters, context=coefficients).mean()
+                        # project to reduced basis and flatten for 1-d residual network input
+                        coefficients = encoder(projections)
+                        coefficients = torch.cat([coefficients.real, coefficients.imag], dim=1)
+                        coefficients = coefficients.reshape(coefficients.shape[0], coefficients.shape[1]*coefficients.shape[2])
 
-                    try:
-                        # async get data from CPU and move to GPU during model forward
-                        projections, parameters = next(iterator) 
-                        projections = projections.to(device, non_blocking=True)
-                        parameters = parameters.to(device, non_blocking=True)
+                        # negative log-likelihood conditional on strain over mini-batch
+                        loss = -flow.module.log_prob(parameters, context=coefficients).mean()
 
-                    except StopIteration:
-                        # exit while loop if iterator is complete
-                        complete = True
-                
+                        try:
+                            # async get data from CPU and move to GPU during model forward
+                            projections, parameters = next(iterator) 
+                            projections = projections.to(device, dtype=torch.complex64, non_blocking=True)
+                            parameters = parameters.to(device, dtype=torch.float32, non_blocking=True)
 
-                    # total loss summed over each sample in batch
-                    val_loss += loss.detach() * coefficients.shape[0]
+                        except StopIteration:
+                            # exit while loop if iterator is complete
+                            complete = True
 
-                # gather total loss during epoch between each GPU worker as list of tensors
-                world_val_loss = [torch.ones_like(val_loss) for _ in range(world_size)]
-                distributed.all_gather(world_val_loss, val_loss)
-                val_loss *= 0.0  # reset loss for next epoch
+                        # total loss summed over each sample in batch
+                        val_loss += loss.detach() * coefficients.shape[0]
 
-                # corner
-                n_samples = 50000
-                sample_size = (n_samples // world_size, parameters.shape[-1])
-                gw150914_samples = [
-                    torch.ones(sample_size, dtype=torch.float32, device=device)
-                    for _ in range(world_size)
-                ]
+                    # gather total loss during epoch between each GPU worker as list of tensors
+                    world_val_loss = [torch.ones_like(val_loss) for _ in range(world_size)]
+                    distributed.all_gather(world_val_loss, val_loss)
+                    val_loss *= 0.0  # reset loss for next epoch
 
-                # generate samples for corner plots etc.
-                samples = nde_flows.sample_flow(
-                    flow.module,
-                    n=n_samples// world_size,
-                    context=gw150914,
-                    output_device='cuda',
-                    dtype=torch.float32,
-                )[0]
-                samples = (samples * std) + mean
-                
-                distributed.all_gather(gw150914_samples, samples)
+                    # validation posteriors
+                    if rank==0:
+                        progress.set_description(f'[{log_dir}] Sampling posteriors')
+                        progress.refresh()
 
-                # validation posteriors
-                # argmax of parameters on distance
-                # argmin of parameters on distance
-                # argmean of parameters on distance
+                    # sample posteriors from training
+                    if rank==3:
+                        # first sample in final batch (random)
+                        context = coefficients[0]
+                        gts = parameters[0]
+
+                    samples = nde_flows.sample_flow(
+                        flow.module,
+                        n=50000,
+                        context=context,
+                        output_device='cuda',
+                        dtype=torch.float32,
+                    )
+
+                    # undo standardized sampled parameters
+                    samples = (samples[0] * std) + mean
+
+                    # gather samples from all gpus
+                    world_samples = [torch.ones_like(samples) for _ in range(world_size)]
+                    distributed.all_gather(world_samples, samples)
+
+                    world_gts = [torch.ones_like(gts) for _ in range(world_size)]
+                    distributed.all_gather(world_gts, gts)
 
 
             if rank == 0:
-                # log average epoch loss across DDP to tensorboard
+                progress.set_description(f'[{log_dir}] Sending to TensorBoard')
+                progress.refresh()
+                
                 scalars = {
-                    'loss/train': torch.cat(world_loss).mean().item() / len(dataloader.dataset),
-                    'loss/validation': torch.cat(world_val_loss).mean().item() / len(val_loader.dataset)
+                    'loss/train': torch.cat(world_loss).sum().item() / len(dataloader.dataset)
                 } 
                 
-                figures = {
-                    'posteriors/gw150914': torch.cat(gw150914_samples, dim=0).cpu(),
-                    # 'posteriors/validation': None,
-                }
+                figures = None  # reset to None for epochs where there is no corner plot
+                if (interval != 0) and (epoch % interval == 0):
+                    scalars['loss/validation'] = torch.cat(world_val_loss).sum().item() / len(val_loader.dataset)
+
+                    # to do - set up this process for num_gpus < 4
+                    figures = {}
+                    world_gts = [gts.cpu() for gts in world_gts]
+                    world_samples = [world_sample.cpu() for world_sample in world_samples]
+                    for i, (world_sample, gt) in enumerate(zip(world_samples, world_gts)):
+                        # data is sent as tuples - .share_memory_() must be called manually
+                        world_sample.share_memory_()
+                        gt.share_memory_()
+
+                        # i should correspond to gpu rank of origin
+                        if i == 0:
+                            figures['posteriors/gw150914'] = world_sample
+                        elif i == 1:
+                            figures['posteriors/validation'] = (world_sample, gt)
+                        elif i == 2:
+                            figures['posteriors/test'] = (world_sample, gt)
+                        elif i == 3:
+                            figures['posteriors/train'] = (world_sample, gt)
 
                 # send data to async process to generate matplotlib figures
                 queue.put((epoch, scalars, figures))
-                figures = None  # reset to None for epochs where there is no corner plot
 
-                if (interval != 0) and (epoch % interval == 0):
+                if (save != 0) and (epoch % save == 0):
                     # save checkpoint and write computationally expensive data to tb
                     torch.save(flow.module.state_dict(), experiment_dir / f'flow_{epoch}.pt')
                     torch.save(optimizer.state_dict(), experiment_dir / f'optimizer_{epoch}.pt')
@@ -510,7 +587,9 @@ if __name__ == '__main__':
     # training settings
     parser.add_argument('--num_gpus', type=int, default=1)
     parser.add_argument('--epochs', type=int, default=10)
-    parser.add_argument('--interval', type=int, default=5)
+    parser.add_argument('--interval', type=int, default=2)
+    parser.add_argument('--save', type=int, default=10)
+    parser.add_argument('--verbose', default=False, action="store_true")
 
     # data directories
     # parser.add_argument('-d', '--data_dir', dest='data_dir', type=str, help='The input directory to load parameter files.')
@@ -518,7 +597,8 @@ if __name__ == '__main__':
     # parser.add_argument('--psd_dir', dest='psd_dir', type=str, help='The output directory to save generated waveform files.')
 
     # logging
-    parser.add_argument('--verbose', default=False, action="store_true")
+
+    logging.getLogger('bilby').setLevel(logging.INFO)
 
 
     args = parser.parse_args()
@@ -536,7 +616,7 @@ if __name__ == '__main__':
         # data distributed parallel
         mp.spawn(
             train_distributed,
-            args=(args.num_gpus, args.epochs, args.interval, args.verbose),
+            args=(args.num_gpus, args.epochs, args.interval, args.save, args.verbose),
             nprocs=args.num_gpus,
             join=True
         )

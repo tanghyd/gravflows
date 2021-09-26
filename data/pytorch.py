@@ -14,7 +14,7 @@ from pycbc.detector import Detector
 # local imports# local imports
 from .config import read_ini_config
 from .parameters import ParameterGenerator
-from .noise import load_psd_from_file
+from .noise import load_psd_from_file, frequency_noise_from_psd
 from .waveforms import batch_project, get_sample_frequencies
 
 class WaveformDataset(Dataset):
@@ -22,19 +22,24 @@ class WaveformDataset(Dataset):
         self,
         data_dir: Union[str, os.PathLike],
         static_args_ini: str,
+        data_file: str='waveforms.npy',
         intrinsics_ini: Optional[str]=None,
         extrinsics_ini: Optional[str]=None,
         psd_dir: Optional[Union[str, os.PathLike]]=None,
         ifos: List[str]=['H1','L1'],
         downcast: bool=False,
+        add_noise: bool=False,
     ):
         # load static argument file
         self.downcast = downcast
+        self.add_noise = add_noise
+
         _, self.static_args = read_ini_config(static_args_ini)
 
         # configure data and settings
+        self.data_file = data_file
         self.data_dir = Path(data_dir)
-        self.psd_dir = Path(psd_dir) if psd_dir is not None else self.data_dir / 'PSD'
+        self.psd_dir = Path(psd_dir) if psd_dir is not None else None
         
         self.ifos = ifos
 #         self.psds = {ifo: load_psd_from_file(self.psd_dir / f'{ifo}_PSD.npy') for ifo in self.ifos}
@@ -43,28 +48,36 @@ class WaveformDataset(Dataset):
         self.parameters = pd.read_csv(self.data_dir / 'parameters.csv', index_col=0)
         
         # loaded on each worker
-        self.intrinsics = ParameterGenerator(config_files=intrinsics_ini, seed=None)
-        self.extrinsics = ParameterGenerator(config_files=extrinsics_ini, seed=None)
-        
+        if intrinsics_ini is not None:
+            self.intrinsics = ParameterGenerator(config_files=intrinsics_ini, seed=None)
+        else:
+            self.intrinsics = None
+        if extrinsics_ini is not None:
+            self.extrinsics = ParameterGenerator(config_files=extrinsics_ini, seed=None)
+        else:
+            self.extrinsics = None
+
         # the following are loaded with worker_init_fn on each process
         self.basis = None
         self.detectors = None
         self.data = None
+        self.asds = None
         
     def _worker_init_fn(self, worker_id: int=None):
         self.detectors = {ifo: Detector(ifo) for ifo in self.ifos}
-        self.data = np.load(self.data_dir / 'waveforms.npy', mmap_mode='r')
+        self.data = np.load(self.data_dir / self.data_file, mmap_mode='r')
         self.sample_frequencies = get_sample_frequencies(
             f_final=self.static_args['f_final'],
             delta_f=self.static_args['delta_f']
         )
         
         # save asds as stacked numpy array for faster compute
-        asds = []
-        for ifo in self.ifos:
-            psd = load_psd_from_file(self.psd_dir / f'{ifo}_PSD.npy')
-            asds.append(psd[:self.static_args['fd_length']] ** 0.5)
-        self.asds = np.stack(asds)
+        if self.psd_dir is not None:
+            asds = []
+            for ifo in self.ifos:
+                psd = load_psd_from_file(self.psd_dir / f'{ifo}_PSD.npy')
+                asds.append(psd[:self.static_args['fd_length']] ** 0.5)
+            self.asds = np.stack(asds)
         
     def _collate_fn(self, batch: Tuple[np.ndarray]):
         # get data

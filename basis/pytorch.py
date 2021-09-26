@@ -154,21 +154,21 @@ class BasisEncoder(nn.Module):
         super().__init__()
         # load reduced basis (randomized_svd: Vh = V.T.conj())
         self.basis_dir = Path(basis_dir)
-        basis = np.load(self.basis_dir / 'reduced_basis.npy')
+        self.n = n
+        
+        np_dtype = np.complex128 if dtype == torch.complex128 else np.complex64
+        basis = np.load(self.basis_dir / 'reduced_basis.npy').astype(np_dtype)
         
         if n is not None:
             # basis truncation
-            assert 0 < n < basis.shape[-1]
+            assert 0 < n <= basis.shape[-1]
             basis = basis[:, :, :n]
         
-        # self.basis = nn.Parameter(torch.from_numpy(basis[None]))
-        self.register_buffer('basis', torch.tensor(basis[None], dtype=dtype, requires_grad=False))
-        self.register_buffer('scaler', torch.ones((self.basis.shape[1], self.basis.shape[3]), dtype=dtype, requires_grad=False)[None])
+        self.basis = nn.Parameter(torch.tensor(basis[None], dtype=dtype))
+        # self.register_buffer('basis', torch.tensor(basis[None], dtype=dtype))
+        self.register_buffer('scaler', torch.ones((1, self.basis.shape[1], self.basis.shape[3]), dtype=dtype))
     
-    def _generate_coefficients(
-        self,
-        projections_file: str='projections.npy'
-    ):
+    def _generate_coefficients(self, projections_file: str='projections.npy'):
         # batch process data (especially on GPU with memory limitations)A
         device = list(self.parameters())[0].device
         dtype = list(self.parameters())[0].dtype
@@ -188,7 +188,7 @@ class BasisEncoder(nn.Module):
                     end = (i+1)*chunk_size
 
                 # batch matrix multiplication with pytorch
-                waveform = torch.tensor(projections[start:end, :], dtype, device)
+                waveform = torch.tensor(projections[start:end, :], dtype=dtype, device=device)
                 coefficients.append(self(waveform).cpu().numpy())
 
         return np.concatenate(coefficients, axis=0)
@@ -204,16 +204,15 @@ class BasisEncoder(nn.Module):
         _, static_args = read_ini_config(static_args_ini)  # should we store args on nn.Module?
         
         device = list(self.parameters())[0].device
-        dtype = list(self.parameters())[0].dtype
+        if list(self.parameters())[0].dtype == torch.complex64:
+            dtype = torch.float32
+        else:
+            dtype = torch.float64
         standardization = get_standardization_factor(coefficients, static_args)
-        self.scaler = torch.tensor(standardization, dtype=dtype, device=device)
+        self.register_buffer('scaler', torch.tensor(standardization, dtype=dtype, device=device)[None])
         
     def forward(self, x):
         return torch.einsum('bij, bijk -> bik', x, self.basis) * self.scaler
                         
     def inverse(self, x):
-        return torch.einsum(
-            'bik, bikj -> bij',
-            x/self.scaler,
-            torch.transpose(self.basis, 2, 3).conj()
-        )
+        return torch.einsum('bik, bikj -> bij', x/self.scaler, torch.transpose(self.basis, 2, 3).conj())

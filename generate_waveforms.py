@@ -291,6 +291,7 @@ def generate_waveform_dataset(
                         projections[:, i, :] = batch_project(detectors[ifo], samples, waveforms, static_args, sample_frequencies)
                         
                         if add_noise:
+                            # are the following approaches to generating noise mathematically AND practically equivalent?
                             if gaussian or psd_dir is None:
                                 # gaussian white noise in frequency domain
                                 size = (end-start, static_args['fd_length'])  # gaussian for each batch for each freq bin
@@ -298,11 +299,12 @@ def generate_waveform_dataset(
                             else:
                                 # coloured noise from psd -- cut to fd_length (bandpass filter for higher frequencies)
                                 noise[:, i, :] = frequency_noise_from_psd(psds[ifo], n=end-start)[:, :static_args['fd_length']]
+                                
+                                if whiten:
+                                    noise[:, i, :] /= psds[ifo][:static_args['fd_length']] ** 0.5
                         
                         if whiten:
                             projections[:, i, :] /= psds[ifo][:static_args['fd_length']] ** 0.5
-                            if add_noise:
-                                noise[:, i, :] /= psds[ifo][:static_args['fd_length']] ** 0.5
 
                         if bandpass:
                             # filter out values less than f_lower (e.g. 20Hz) - to do: check truncation vs. zeroing
