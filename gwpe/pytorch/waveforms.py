@@ -12,10 +12,10 @@ from torch.utils.data import Dataset
 from pycbc.detector import Detector
 
 # local imports# local imports
-from .config import read_ini_config
-from .parameters import ParameterGenerator
-from .noise import load_psd_from_file, frequency_noise_from_psd
-from .waveforms import batch_project, get_sample_frequencies
+from ..utils import read_ini_config
+from ..parameters import ParameterGenerator
+from ..noise import load_psd_from_file
+from ..waveforms import batch_project
 
 class WaveformDataset(Dataset):
     def __init__(
@@ -29,10 +29,14 @@ class WaveformDataset(Dataset):
         ifos: List[str]=['H1','L1'],
         downcast: bool=False,
         add_noise: bool=False,
+        scale: bool=False,
+        shift: bool=False,
     ):
         # load static argument file
         self.downcast = downcast
         self.add_noise = add_noise
+        self.scale = scale
+        self.shift = shift
 
         _, self.static_args = read_ini_config(static_args_ini)
 
@@ -66,11 +70,7 @@ class WaveformDataset(Dataset):
     def _worker_init_fn(self, worker_id: int=None):
         self.detectors = {ifo: Detector(ifo) for ifo in self.ifos}
         self.data = np.load(self.data_dir / self.data_file, mmap_mode='r')
-        self.sample_frequencies = get_sample_frequencies(
-            f_final=self.static_args['f_final'],
-            delta_f=self.static_args['delta_f']
-        )
-        
+
         # save asds as stacked numpy array for faster compute
         if self.psd_dir is not None:
             asds = []
@@ -96,7 +96,8 @@ class WaveformDataset(Dataset):
                 extrinsics,  # np.recarray
                 waveforms,
                 self.static_args,
-                self.sample_frequencies
+                scale=self.scale,
+                shift=self.shift,
             )
             
         # filter out values less than f_lower (e.g. 20Hz) - to do: check truncation vs. zeroing
@@ -108,6 +109,19 @@ class WaveformDataset(Dataset):
         # parameter standardization
         parameters = np.concatenate([intrinsics, np.array(extrinsics.tolist())], axis=1)
         mean, std = np.concatenate([self.intrinsics.statistics.values, self.extrinsics.statistics.values]).T
+
+        # handle parameter scaling for no time shift/distance scaling
+        # time_idx = len(self.intrinsics.parameters) + self.extrinsics.parameters.index('time')
+        # distance_idx = len(self.intrinsics.parameters) + self.extrinsics.parameters.index('distance')
+        # mean[distance_idx] = 0.
+        # std[distance_idx] = 1.
+        # mean[time_idx] = 0.
+        # std[time_idx] = 1.
+        
+        # hard code fix ground truths
+        # parameters[:, distance_idx] = 0
+        # parameters[:, time_idx] = 0
+
         parameters = (parameters - mean) / std
         
         # build and typecast data - 0.07s per call (0.14s total) (batch_size=2000)

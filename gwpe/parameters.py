@@ -1,9 +1,19 @@
+
 import os
-from typing import Tuple, Dict, Union, List, Optional
+import shutil
+import argparse
+import time
+
+from datetime import datetime
+from pathlib import Path
+from typing import Optional, Union, List, Dict
+
+# TO DO: Implement logging instead of print statements
+# import logging
+
 import numpy as np
 import pandas as pd
 
-# gravitational wave science
 import pycbc
 from pycbc.workflow import WorkflowConfigParser
 from pycbc.transforms import apply_transforms, read_transforms_from_config
@@ -12,8 +22,8 @@ from pycbc.distributions import (
     read_constraints_from_config, read_distributions_from_config
 )
 
- # using customised pycbc constraint import
-from .pycbc import constraints
+# using customised pycbc constraint import
+from .utils.pycbc import constraints
 
 class ParameterGenerator:
     
@@ -116,7 +126,6 @@ def compute_parameter_statistics(bounds: Dict[str, pycbc.boundaries.Bounds]):
     
     We use analytic expressions defined by Green and Gair https://arxiv.org/abs/2008.03312.
     These are used to standardize parameters before being input to a neural network.
-
     """
 
     statistics = pd.DataFrame(columns=['mean','std'])
@@ -190,3 +199,88 @@ def compute_parameter_statistics(bounds: Dict[str, pycbc.boundaries.Bounds]):
         statistics = statistics.append(pd.Series({'mean': mean, 'std': std}, name=param))
 
     return statistics
+
+
+def generate_parameters(
+    n: int,
+    config_files: Union[List[str], str],
+    data_dir: str='data',
+    file_name: str='parameters.csv',
+    overwrite: bool=False,
+    metadata: bool=True,
+    verbose: bool=True,
+):
+    """Convenience function to generate parameters from a ParameterGenerator
+    object and save them to disk as a .csv file.
+    
+    Can also copy corresponding PyCBC prior distribution metadata for completeness.
+
+    Arguments:
+        n: int
+            Number of samples to generate.
+        config_files: List[str] or str.
+            A file path to a compatible PyCBC params.ini config files.
+            This can also be a list of config_files (to do: check case if there are duplicates?).
+        data_dir: str
+            The output directory to save generated parameter data.
+        file_name: str
+            The output .csv file name to save the generated parameters.
+        overwrite: bool=True
+            If true, completely overwrites the previous directory specified at data_dir.
+        metadata: bool=False
+            Whether to copy config file metadata as .ini file to data_dir with same file base name.
+
+    """
+    if verbose:
+        start = time.perf_counter()
+
+    # specify output directory and file
+    data_dir = Path(data_dir)
+    assert not data_dir.is_file(), f"{data_dir} is a file. It should either not exist or be a directory."
+    if overwrite and data_dir.is_dir():
+        shutil.rmtree(data_dir)  # does not remove parents if nested
+    data_dir.mkdir(parents=True, exist_ok=True)
+        
+    # generate intrinsic parameters
+    generator = ParameterGenerator(config_files=config_files, seed=None)
+    parameters = generator.draw(n, as_df=True)
+    
+    # save parameters and metadata
+    csv_path = data_dir / file_name  # filename should include .csv extension
+    parameters.to_csv(data_dir / file_name, index_label='index')
+    if metadata:
+        config_dir = data_dir / 'config_files'
+        config_dir.mkdir(exist_ok=True)
+        with open(config_dir / f'{csv_path.stem}.ini', 'w') as file:
+            generator.config_parser.write(file)
+
+    if verbose:
+        end = time.perf_counter()
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] Generated {n} parameters to {csv_path} in {round(end-start, 4)}s.")
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Arguments for parameter generation code.')
+
+    parser.add_argument('-n', type=int, help="Number of parameter samples to generate.")
+    parser.add_argument('-d', '--data_dir', default='data', dest='data_dir', type=str, help='The output directory to save generated waveform files.')
+    parser.add_argument('-f', '--file_name', default='parameters.csv', dest='file_name', type=str, help='The output .csv file name to save the generated parameters.')
+    parser.add_argument('--overwrite', default=False, action="store_true", help="Whether to overwrite files if data_dir already exists.")
+    parser.add_argument('--metadata', default=False, action="store_true", help="Whether to copy config file metadata to data_dir with parameters.")
+    parser.add_argument('-v', '--verbose', dest='verbose', default=False, action="store_true", help="Sets verbose mode to track runtime.")
+    # parser.add_argument('--validate', default=False, action="store_true", help='Whether to validate a sample of the data to check for correctness.')
+
+    parser.add_argument(
+        '-c', '--config_files', dest='config_files', type=str, action='append', #nargs='+',
+        help='A file path to a compatible PyCBC ini config files. Can be called multiple times if there are no duplicates.'
+    )
+    
+    # random seed
+    # parser.add_argument('--seed', type=int")  # to do
+
+    # logging
+    # parser.add_argument("-l", "--logging", default="INFO", choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'], help="Set the logging level")
+
+    args = parser.parse_args()
+    assert args.config_files is not None, ".ini config files must be provided with -c or --config_files."
+    
+    generate_parameters(**args.__dict__)

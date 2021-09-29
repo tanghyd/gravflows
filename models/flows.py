@@ -1,12 +1,13 @@
+# Code originally forked from Green and Gair (2020)
+# https://github.com/stephengreen/lfi-gw/blob/master/lfigw/nde_flows.py
+ 
 from typing import Union, Optional
 import numpy as np
 import torch
 from torch.nn import functional as F
 
 from nflows import distributions, flows, transforms, utils
-
-import nflows.nn.nets as nn_
-
+from nflows.nn import nets
 
 def create_linear_transform(param_dim):
     """Create the composite linear transform PLU.
@@ -98,7 +99,7 @@ def create_base_transform(i,
             mask=utils.create_alternating_binary_mask(
                 param_dim, even=(i % 2 == 0)),
             transform_net_create_fn=(lambda in_features, out_features:
-                                    nn_.ResidualNet(
+                                    nets.ResidualNet(
                                         in_features=in_features,
                                         out_features=out_features,
                                         hidden_features=hidden_dim,
@@ -134,11 +135,12 @@ def create_base_transform(i,
     else:
         raise ValueError
 
-
-def create_transform(num_flow_steps,
-                     param_dim,
-                     context_dim,
-                     base_transform_kwargs):
+def create_transform(
+    num_flow_steps: int,
+    param_dim: int,
+    context_dim: int,
+    base_transform_kwargs: dict,
+):
     """Build a sequence of NSF transforms, which maps parameters x into the
     base distribution u (noise). Transforms are conditioned on strain data y.
 
@@ -147,6 +149,7 @@ def create_transform(num_flow_steps,
     Each step in the sequence consists of
         * A linear transform of x, which in particular permutes components
         * A NSF transform of x, conditioned on y.
+        
     There is one final linear transform at the end.
 
     This function was adapted from the uci.py example in
@@ -160,17 +163,50 @@ def create_transform(num_flow_steps,
 
     Returns:
         Transform -- the constructed transform
+
+
     """
+    # transform = transforms.CompositeTransform([
+    #     transforms.CompositeTransform([
+    #         create_linear_transform(param_dim),
+    #         create_base_transform(
+    #             i,
+    #             param_dim,
+    #             context_dim=context_dim,
+    #             **base_transform_kwargs
+    #         )
+    #     ]) for i in range(num_flow_steps)
+    # ] + [
+    #     create_linear_transform(param_dim)
+    # ])
+
+    # This architecture has been re-compartmentalized to have an initial linear
+    # transform, followed by pairs of (NSF, linear) transforms. The architecture
+    # should be exactly the same as in lfigw/nde_flows.py but intermediate layers
+    # have been grouped differently for ease of visualising intermediate predictions.
 
     transform = transforms.CompositeTransform([
         transforms.CompositeTransform([
             create_linear_transform(param_dim),
-            create_base_transform(i, param_dim, context_dim=context_dim,
-                                  **base_transform_kwargs)
-        ]) for i in range(num_flow_steps)
-    ] + [
-        create_linear_transform(param_dim)
-    ])
+            create_base_transform(
+                i,
+                param_dim,
+                context_dim=context_dim,
+                **base_transform_kwargs
+            )
+        ]) for i in range(num_flow_steps-1)
+    ] + [transforms.CompositeTransform([
+            create_linear_transform(param_dim),
+            create_base_transform(
+                num_flow_steps-1,
+                param_dim,
+                context_dim=context_dim,
+                **base_transform_kwargs
+            ),
+            create_linear_transform(param_dim)
+        ])]
+    )
+
     return transform
 
 
@@ -198,8 +234,7 @@ def create_NDE_model(input_dim, context_dim, num_flow_steps,
     transform = create_transform(num_flow_steps, input_dim, context_dim, base_transform_kwargs)
     flow = flows.Flow(transform, distribution)
 
-    # Store hyperparameters. This is for reconstructing model when loading from
-    # saved file.
+    # Store hyperparameters - useful for loading from file.
 
     flow.model_hyperparams = {
         'input_dim': input_dim,
@@ -209,189 +244,6 @@ def create_NDE_model(input_dim, context_dim, num_flow_steps,
     }
 
     return flow
-
-
-anneal_duration = 50
-anneal_max = 3.0
-
-
-def anneal_schedule(epoch, quiet=False):
-    if epoch <= anneal_duration:
-        exponent = anneal_max * (anneal_duration - epoch + 1) / anneal_duration
-    else:
-        exponent = 0.0
-    if not quiet:
-        print('Setting annealing exponent to {}.'.format(exponent))
-    return exponent
-
-
-def train_epoch(flow, train_loader, optimizer, epoch,
-                device=None,
-                output_freq=50, add_noise=True, annealing=False):
-    """Train model for one epoch.
-
-    Arguments:
-        flow {Flow} -- NSF model
-        train_loader {DataLoader} -- train set data loader
-        optimizer {Optimizer} -- model optimizer
-        epoch {int} -- epoch number
-
-    Keyword Arguments:
-        device {torch.device} -- model device (CPU or GPU) (default: {None})
-        output_freq {int} -- frequency for printing status (default: {50})
-
-    Returns:
-        float -- average train loss over epoch
-    """
-
-    flow.train()
-    train_loss = 0.0
-    total_weight = 0.0
-
-    if annealing:
-        anneal_exponent = anneal_schedule(epoch)
-    else:
-        anneal_exponent = 0.0
-
-    # Change the sampling properties of the dataset over time
-
-    if annealing:
-        wfd = train_loader.dataset.wfd
-
-        snr_threshold = 2 * anneal_exponent
-        if snr_threshold > 0.0:
-            print('SNR threshold: {}'.format(snr_threshold))
-            wfd.snr_threshold = snr_threshold
-        else:
-            wfd.snr_threshold = None
-
-        if anneal_exponent >= 2.0:
-            wfd.importance_sampling = 'inverse_distance'
-        elif anneal_exponent >= 1.0:
-            wfd.importance_sampling = 'uniform_distance'
-        else:
-            wfd.importance_sampling = 'linear_distance'
-        print('Importance sampling: {}'.format(wfd.importance_sampling))
-
-        snr_threshold = torch.tensor(snr_threshold).to(device)
-
-    anneal_exponent = torch.tensor(anneal_exponent).to(device)
-
-    for batch_idx, (h, x, w, snr) in enumerate(train_loader):
-        optimizer.zero_grad()
-
-        if device is not None:
-            h = h.to(device, non_blocking=True)
-            x = x.to(device, non_blocking=True)
-            w = w.to(device, non_blocking=True)
-            snr = snr.to(device, non_blocking=True)
-
-        if add_noise:
-            # Sample a noise realization
-            y = h + torch.randn_like(h)
-            print('Should not be here')
-        else:
-            y = h
-
-        # Compute log prob
-        loss = - flow.log_prob(x, context=y)
-
-        if anneal_exponent > 0.0:
-            anneal_factor = (snr - snr_threshold) ** anneal_exponent
-        else:
-            anneal_factor = torch.tensor(1.0).to(device)
-
-        loss = loss * anneal_factor
-
-        # Keep track of total loss. w is a weight to be applied to each
-        # element.
-        train_loss += (w * loss).sum()
-        total_weight += w.sum()
-
-        # loss = (w * loss).sum() / w.sum()
-        loss = (w * loss).mean()
-
-        loss.backward()
-        optimizer.step()
-
-        if (output_freq is not None) and (batch_idx % output_freq == 0):
-            print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.4f}'.format(
-                epoch, batch_idx *
-                train_loader.batch_size, len(train_loader.dataset),
-                100. * batch_idx / len(train_loader),
-                loss.item()))
-
-    train_loss = train_loss.item() / len(train_loader.dataset)
-    # train_loss = train_loss.item() / total_weight.item()
-    print('Train Epoch: {} \tAverage Loss: {:.4f}'.format(epoch, train_loss))
-
-    return train_loss
-
-
-def test_epoch(flow, test_loader, epoch, device=None, add_noise=True,
-               annealing=False):
-    """Calculate test loss for one epoch.
-
-    Arguments:
-        flow {Flow} -- NSF model
-        test_loader {DataLoader} -- test set data loader
-
-    Keyword Arguments:
-        device {torch.device} -- model device (CPU or GPu) (default: {None})
-
-    Returns:
-        float -- test loss
-    """
-
-    if annealing:
-        anneal_exponent = anneal_schedule(epoch, quiet=True)
-    else:
-        anneal_exponent = 0.0
-
-    snr_threshold = 2 * anneal_exponent
-
-    anneal_exponent = torch.tensor(anneal_exponent).to(device)
-    snr_threshold = torch.tensor(snr_threshold).to(device)
-
-    with torch.no_grad():
-        flow.eval()
-        test_loss = 0.0
-        total_weight = 0.0
-        for h, x, w, snr in test_loader:
-
-            if device is not None:
-                h = h.to(device, non_blocking=True)
-                x = x.to(device, non_blocking=True)
-                w = w.to(device, non_blocking=True)
-                snr = snr.to(device, non_blocking=True)
-
-            if add_noise:
-                # Sample a noise realization
-                y = h + torch.randn_like(h)
-            else:
-                y = h
-
-            # Compute log prob
-            loss = - flow.log_prob(x, context=y)
-
-            if anneal_exponent > 0.0:
-                anneal_factor = (snr - snr_threshold) ** anneal_exponent
-            else:
-                anneal_factor = torch.tensor(1.0).to(device)
-
-            loss = loss * anneal_factor
-
-            # Keep track of total loss
-            test_loss += (w * loss).sum()
-            total_weight += w.sum()
-
-        test_loss = test_loss.item() / len(test_loader.dataset)
-        # test_loss = test_loss.item() / total_weight.item()
-        print('Test set: Average loss: {:.4f}\n'
-              .format(test_loss))
-
-        return test_loss
-
 
 def sample_flow(
     flow,

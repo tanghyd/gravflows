@@ -60,6 +60,7 @@ logging.basicConfig(
 )
 
 # logging.getLogger('asyncio').setLevel(logging.WARNING)
+
 logger = logging.getLogger(__name__)
 
 async def on_request_start(session, context, params):
