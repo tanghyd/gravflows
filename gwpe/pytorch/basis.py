@@ -45,7 +45,7 @@ def basis_reconstruction(
                 end = (i+1)*chunk_size
                 
             # batch matrix multiplication
-            waveform = data[start:end, :]
+            waveform = data[start:end, :].to(dtype=basis.dtype)
             reconstruction = (waveform @ basis[:, :n]) @ basis.T.conj()[:n, :]
             waveforms.append(waveform.cpu())
             reconstructions.append(reconstruction.cpu())
@@ -146,7 +146,6 @@ def fit_time_translation(
     # torch.einsum is faster than np.einsum by orders of magnitude
     if isinstance(V, np.ndarray): V = torch.from_numpy(V)
     if isinstance(Vh, np.ndarray): Vh = torch.from_numpy(Vh)
-    V = V.to(torch.complex64)
     Vh = Vh.to(torch.complex64)
 
     chunks = int(np.ceil(Nt / chunk_size))
@@ -205,87 +204,113 @@ class BasisEncoder(nn.Module):
             Must be between 0 < n <= basis.shape[0].
     """
     def __init__(
-    
         self,
         static_args_ini: str,
         data_dir: Union[str, os.PathLike],
         projections_file: str='projections.npy',
         ifos: List[str]=['H1', 'L1'],
-        downcast: bool=True,
+        mmap_mode: Optional[str]=None,
+        time_translations: bool=False, 
+        preload: bool=True,
     ):
         super().__init__()
         
         self.basis = SVDBasis(static_args_ini, data_dir, ifos, projections_file, preload=False)
-        self.basis.load(downcast=downcast)
 
-        self.V = nn.Parameter(torch.from_numpy(self.basis.V))
-        self.register_buffer('standardization', torch.from_numpy(self.basis.standardization))
-        
-    def time_translate(self, coefficients: torch.Tensor, dt: float, interpolation: str='cubic'):
-        # left-most index position in dt_grid array given provided dt
-        pos = np.searchsorted(self.basis.dt_grid, dt, side='right') - 1
-
-        if self.basis.dt_grid[pos] == dt:
-            translated = torch.einsum(
-                'bij, ijk -> bik',
-                coefficients, 
-                torch.tensor(self.basis.T_matrices[:, pos], coefficients.device)
-            )
-
+        if preload:
+            self.load(mmap_mode=mmap_mode, time_translations=time_translations)
         else:
-            t_left, t_right = self.basis.dt_grid[pos: pos+2]
+            self.register_parameter('V', None)
+            self.register_buffer('standardization', None)
 
-            # Interpolation parameter u(dt) defined so that:
-            # u(t_left) = 0, u(t_right) = 1
-            u = (dt - t_left) / (t_right - t_left)
+    def load(
+        self,
+        n: Optional[int]=None,
+        mmap_mode: Optional[str]=None,
+        time_translations: bool=False,
+        verbose: bool=False,
+    ):
+        self.basis.load(mmap_mode=mmap_mode, time_translations=time_translations, verbose=verbose)
+        if n is not None: self.basis.truncate(n)
+        self.V = nn.Parameter(torch.from_numpy(self.basis.V))
+        scaler = torch.from_numpy(self.basis.standardization.astype(self.basis.V.dtype))
+        self.register_buffer('standardization', scaler)
 
-            # Require coefficients evaluated on boundaries of interval
-            y_left = torch.einsum(
-                'bij, ijk -> bik',
+    def time_translate(
+        self,
+        coefficients: torch.Tensor,
+        dt: Union[float, torch.Tensor],
+        interpolation: str='cubic'
+    ):
+        assert self.basis.T_matrices is not None  # assumes T_matrices_deriv is loaded too
+
+        # WARNING: T_matrix can take up a lot of memory - we recommend cpu or basis truncation
+
+        if isinstance(dt, float):
+            dt = torch.ones(coefficients.shape[0], device=coefficients.device)*dt
+
+        # left-most index position in dt_grid array given provided dt
+        dt_grid = torch.from_numpy(self.basis.dt_grid).to(coefficients.device)
+        pos = (torch.searchsorted(dt_grid, dt, right=True) - 1).detach().cpu().numpy()
+        # we automatically batch interpolate for convenience
+        t_left = dt_grid[pos]
+        t_right = dt_grid[pos+1]
+
+        # Interpolation parameter u(dt) defined so that:
+        # u(t_left) = 0, u(t_right) = 1
+        u = (dt - t_left) / (t_right - t_left)
+
+        # Require coefficients evaluated on boundaries of interval
+        y_left = torch.einsum(
+            'bij, ibjk -> bik',
+            coefficients,
+            # torch.tensor(self.basis.T_matrices[:, pos], device=coefficients.device)
+            torch.from_numpy(self.basis.T_matrices[:, pos])
+        )
+        
+        y_right = torch.einsum(
+            'bij, ibjk -> bik',
+            coefficients,
+            # torch.tensor(self.basis.T_matrices[:, pos+1], device=coefficients.device)
+            torch.from_numpy(self.basis.T_matrices[:, pos+1])
+        )
+
+        if interpolation == 'linear':
+
+            translated = y_left * (1 - u[:, None, None]) + y_right * u[:, None, None]
+
+        elif interpolation == 'cubic':
+
+            # Also require derivative of coefficients wrt dt
+            dydt_left = torch.einsum(
+                'bij, ibjk -> bik',
                 coefficients,
-                torch.tensor(self.basis.T_matrices[:, pos], coefficients.device)
+                # torch.tensor(self.basis.T_matrices_deriv[:, pos], device=coefficients.device)
+                torch.from_numpy(self.basis.T_matrices_deriv[:, pos])
             )
-            
-            y_right = torch.einsum(
-                'bij, ijk -> bik',
+
+            dydt_right = torch.einsum(
+                'bij, ibjk -> bik',
                 coefficients,
-                torch.tensor(self.basis.T_matrices[:, pos+1], coefficients.device)
+                # torch.tensor(self.basis.T_matrices_deriv[:, pos+1], device=coefficients.device)
+                torch.from_numpy(self.basis.T_matrices_deriv[:, pos+1])
             )
 
-            if interpolation == 'linear':
+            # Cubic interpolation over interval
+            # See https://en.wikipedia.org/wiki/Cubic_Hermite_spline
+            h00 = (2*(u**3) - 3*(u**2) + 1)[:, None, None]
+            h10 = (u**3 - 2*(u**2) + u)[:, None, None]
+            h01 = (-2*(u**3) + 3*(u**2))[:, None, None]
+            h11 = (u**3 - u**2)[:, None, None]
 
-                translated = y_left * (1 - u) + y_right * u
+            translated = (
+                y_left * h00
+                + dydt_left * h10 * (t_right - t_left)[:, None, None]
+                + y_right * h01
+                + dydt_right * h11 * (t_right - t_left)[:, None, None]
+            )
 
-            elif interpolation == 'cubic':
-
-                # Also require derivative of coefficients wrt dt
-                dydt_left = torch.einsum(
-                    'bij, ijk -> bik',
-                    coefficients,
-                    torch.tensor(self.basis.T_matrices_deriv[:, pos], coefficients.device)
-                )
-
-                dydt_right = torch.einsum(
-                    'bij, ijk -> bik',
-                    coefficients,
-                    torch.tensor(self.basis.T_matrices_deriv[:, pos+1], coefficients.device)
-                )
-
-                # Cubic interpolation over interval
-                # See https://en.wikipedia.org/wiki/Cubic_Hermite_spline
-                h00 = 2*(u**3) - 3*(u**2) + 1
-                h10 = u**3 - 2*(u**2) + u
-                h01 = -2*(u**3) + 3*(u**2)
-                h11 = u**3 - u**2
-
-                translated = (
-                    y_left * h00
-                    + dydt_left * h10 * (t_right - t_left)
-                    + y_right * h01
-                    + dydt_right * h11 * (t_right - t_left)
-                )
-
-        return translated
+        return translated#.to(device)
         
     def forward(self, x, scale: bool=True):
         coefficients = torch.einsum('bij, ijk -> bik', x, self.V)

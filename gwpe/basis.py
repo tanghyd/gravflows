@@ -1,5 +1,5 @@
 import os
-import h5py
+import json
 import argparse
 import time
 
@@ -66,7 +66,7 @@ def basis_reconstruction(
     basis: np.ndarray,
     chunk_size: int=2500,
     n: Optional[int]=None,
-    verbose: bool=True,
+    verbose: bool=False,
 ) -> Tuple[np.ndarray]:
 
     # store results
@@ -135,7 +135,7 @@ def evaluate_basis_reconstruction(
     basis: np.ndarray,
     batch_size: int=5000,
     n: Optional[Union[List[int], int]]=None,
-    verbose: bool=True,
+    verbose: bool=False,
 ) -> Dict[str, float]:
     
     statistics = []
@@ -159,6 +159,8 @@ class SVDBasis:
         preload: bool=False,
     ):
         # load static argument file
+        # if isinstance(static_args_ini, dict):
+        #     self.static_args = static_args_ini  # assume preloaded
         _, self.static_args = read_ini_config(static_args_ini)
 
         # specify output directory and file
@@ -170,9 +172,9 @@ class SVDBasis:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         assert (self.data_dir / projections_file).is_file()
         self.projections_file = projections_file
-        self.ifos = ifos
         
         # saved reduced basis elements
+        self.ifos = ifos
         self.V = None
         self.Vh = None
         self.standardization = None
@@ -190,16 +192,34 @@ class SVDBasis:
         t_min: float=-0.1,
         t_max: float=0.1,
         Nt: int=1001,
+        chunk_size: int=2000,
         verbose: bool=True,
         pytorch: bool=True,
+        time_translations: bool=False,
     ):
         assert n > 0, f"Number of reduced basis elements n must be greater than 0."
         self.n = n
         self._fit_randomized_svd(n, verbose)
-        coefficients = self._generate_coefficients()
+        coefficients = self._generate_coefficients(chunk_size=chunk_size, verbose=verbose)
         self.standardization = self._fit_standardization(coefficients)
-        self._fit_time_translation(t_min, t_max, Nt, verbose=verbose, pytorch=pytorch)
 
+        if time_translations:
+            self._fit_time_translation(t_min, t_max, Nt, verbose=verbose, pytorch=pytorch)
+
+    def truncate(self, n: int):
+        assert 1 <= n <= self.V.shape[2], f"n={n} must be a positive int <= {self.V.shape[2]}"
+        self.V = self.V[:, :, :n]
+        self.Vh = self.Vh[:, :n, :]
+
+        if self.standardization is not None:
+            self.standardization = self.standardization[:, :n]
+
+        if self.T_matrices is not None:
+            self.T_matrices = self.T_matrices[:, :, :n, :n]
+            self.T_matrices_deriv = self.T_matrices_deriv[:, :, :n, :n]
+
+        self.n = n
+        
     def _fit_randomized_svd(self, n: int=500, verbose: bool=True):
     
         # load projections from disk as copy-on-write memory mapped array
@@ -257,13 +277,13 @@ class SVDBasis:
                 axis=1
             ))
 
-        return np.concatenate(coefficients, axis=0)
+        return np.concatenate(coefficients, axis=0).astype(np.complex64)
         
     def _fit_standardization(
         self,
         coefficients: np.ndarray,
     ):
-        return get_standardization_factor(coefficients, self.static_args)
+        return get_standardization_factor(coefficients, self.static_args).astype(np.float32)
 
     def _fit_time_translation(
         self,
@@ -431,9 +451,12 @@ class SVDBasis:
     def save(
         self,
         basis_dir: Optional[Union[str, os.PathLike]]=None,
-        filename='reduced_basis.hdf5',
+        folder_name='reduced_basis',
         verbose: bool=True,
     ):
+        if verbose:
+            start = time.perf_counter()
+
         # whether to save as single or double precision
 #         complex_dtype = np.complex64 if downcast else np.complex128
 #         real_dtype = np.float32 if downcast else np.float64
@@ -442,47 +465,17 @@ class SVDBasis:
         if basis_dir is None:
             basis_dir = self.data_dir
         basis_dir = Path(basis_dir)
-        basis_dir.mkdir(parents=True, exist_ok=True)
+        basis_folder = basis_dir / folder_name
+        basis_folder.mkdir(parents=True, exist_ok=True)
 
-        if verbose:
-            start = time.perf_counter()
 
-        with h5py.File(basis_dir / filename, 'w') as file:
-            
-            # V matrix and corresponding interoferometers for each ifo dim
-            file.create_dataset("ifos", data=np.array(self.ifos).astype('S'))
-            file.create_dataset(
-                "V", data=self.V,#.astype(complex_dtype),
-                compression='gzip', compression_opts=9
-            )
-
-            # standrdization matrix
-            assert self.standardization is not None
-            file.create_dataset(
-                "standardization",
-                data=self.standardization,#.astype(real_dtype),
-                compression="gzip"
-            )
-
-            # time translation group of data
-            assert self.T_matrices is not None
-            group = file.create_group("time_translation")
-            group.create_dataset(
-                "dt_grid",
-                data=self.dt_grid,#.astype(real_dtype),
-                compression='gzip', compression_opts=9
-            )
-            
-            group.create_dataset(
-                "T_matrices",
-                data=self.T_matrices,#.astype(complex_dtype),
-                compression='gzip', compression_opts=9)
-            
-            group.create_dataset(
-                "T_matrices_deriv",
-                data=self.T_matrices_deriv,#.astype(complex_dtype),
-                compression='gzip', compression_opts=9
-            )   
+        np.save(basis_folder / 'V.npy', self.V)
+        np.save(basis_folder / 'standardization.npy', self.standardization)
+        np.save(basis_folder/ 'dt_grid.npy', self.dt_grid)
+        np.save(basis_folder / 'T_matrices.npy', self.T_matrices)
+        np.save(basis_folder / 'T_matrices_deriv.npy', self.T_matrices_deriv)
+        with open(basis_folder / 'ifos.json', 'w') as f:
+            json.dump({'ifos': self.ifos}, f)
         
         if verbose:
             end = time.perf_counter()
@@ -491,47 +484,42 @@ class SVDBasis:
     def load(
         self,
         basis_dir: Optional[Union[str, os.PathLike]]=None,
-        filename='reduced_basis.hdf5',
+        folder_name='reduced_basis',
+        mmap_mode: Optional[str]=None,
+        time_translations: bool=False,
         verbose: bool=True,
     ):
-        # whether to load as single or double precision
-        # complex_dtype = np.complex64 if downcast else np.complex128
-        # real_dtype = np.float32 if downcast else np.float64
-        
-        if basis_dir is None:
-            basis_dir = self.data_dir
-        basis_dir = Path(basis_dir)
-        
         if verbose:
             start = time.perf_counter()
+        
+        if basis_dir is None: basis_dir = self.data_dir
+        basis_dir = Path(basis_dir)
+        basis_folder = basis_dir / folder_name
+        
 
-        # load reduced basis elements
-        with h5py.File(basis_dir / filename, 'r') as file:
-            
-            # V matrix and corresponding interoferometers for each ifo dim
-            self.ifos = [ifo.decode('utf-8') for ifo in file['ifos'][:]]
-            self.V = file['V'][:, :, :]#astype(complex_dtype)
-            self.Vh = self.V.T.conj()
-            self.n = self.V.shape[-1]
-            
-            # time translation matrices
-            self.dt_grid = file['time_translation']['dt_grid'][:]#.astype(real_dtype)
-            self.T_matrices = file['time_translation']['T_matrices'][:, :, :, :]#.astype(complex_dtype)
-            self.T_matrices_deriv = file['time_translation']['T_matrices_deriv'][:, :, :, :]#.astype(complex_dtype)
+        self.V = np.load(basis_folder / 'V.npy')
+        self.Vh = self.V.transpose(0, 2, 1).conj()
+        self.standardization = np.load(basis_folder / 'standardization.npy')
 
-            # standrdization matrix
-            self.standardization = file['standardization'][:, :]#.astype(real_dtype)
+        if time_translations:
+            self.dt_grid = np.load(basis_folder/ 'dt_grid.npy')
+            self.T_matrices = np.load(basis_folder / 'T_matrices.npy', mmap_mode)
+            self.T_matrices_deriv = np.load(basis_folder / 'T_matrices_deriv.npy', mmap_mode)
+
+        with open(basis_folder / 'ifos.json', 'r') as f:
+            self.ifos = json.load(f)['ifos']
 
         if verbose:
             end = time.perf_counter()
             print(f"[{datetime.now().strftime('%H:%M:%S')}] Loaded reduced basis data from {basis_dir} in {round(end-start, 4)}s.")
 
-def fit_randomized_svd(
+def generate_basis(
     static_args_ini: str,
     num_basis: int=1000,
+    chunk_size: int=2000,
     data_dir: str='data',
     out_dir: Optional[str]=None,
-    file_name: str='reduced_basis.npy',
+    folder_name: str='reduced_basis',
     ifos: List[str]=['H1', 'L1'],
     overwrite: bool=False,
     verbose: bool=True,
@@ -551,14 +539,15 @@ def fit_randomized_svd(
     
     # fit randomised SVD and save .hdf5
     basis = SVDBasis(data_dir, static_args_ini, ifos, preload=False)
-    basis.fit(num_basis, verbose=verbose, pytorch=True)
-    basis.save(out_dir, file_name)
+    basis.fit(num_basis, verbose=verbose, pytorch=True, chunk_size=chunk_size)
+    basis.save(out_dir, folder_name)
 
     # load projections from disk as copy-on-write memory mapped array
     projections = np.load(data_dir / 'projections.npy', mmap_mode='c')  # copy-on-write
 
     if validate:
-        basis_dir = out_dir / 'reconstruction'
+        reconstruction_dir = out_dir / 'reduced_basis' / 'reconstruction'
+        reconstruction_dir.mkdir(parents=True, exist_ok=True)
         interval = 100
 
         for i, ifo in enumerate(ifos):
@@ -574,7 +563,66 @@ def fit_randomized_svd(
                 statistics = evaluate_basis_reconstruction(data, basis.V[i], n=list(range(100, num_basis+1, interval)))
             
             # to do: consider better approach to store statistical results
-            statistics.to_csv(basis_dir / f'{ifo}_reconstruction.csv', index=False)
+            statistics.to_csv(reconstruction_dir / f'{ifo}_reconstruction.csv', index=False)
+
+def generate_coefficients(
+    static_args_ini: str,
+    num_basis: Optional[int]=None,
+    chunk_size: int=5000,
+    data_dir: str='data',
+    projections_dir: Optional[str]=None,
+    projections_file: str='projections.npy',
+    ifos: List[str]=['H1', 'L1'],
+    verbose: bool=True,
+    overwrite: bool=False,
+    validate: bool=False,
+):
+    import torch
+
+    """Generate reduced coefficients by batch matrix multpliication of loaded
+    projected waveforms and the saved reduced basis V."""
+    # specify output directory and file
+    data_dir = Path(data_dir)  # basis dir
+    assert data_dir.is_dir(), f"{data_dir} must be a directory."
+
+    # specify output directory
+    projections_dir = Path(projections_dir) if projections_dir is not None else data_dir
+    assert projections_dir.is_dir(), f"{projections_dir} must be a directory."
+
+    # load reduced basis elements
+    basis = SVDBasis(data_dir, static_args_ini, ifos, preload=False)
+    basis.load(mmap_mode='r', time_translations=False, verbose=verbose)
+    if num_basis is not None: basis.truncate(num_basis)
+
+    V = torch.from_numpy(basis.V)
+
+    projections = np.load(projections_dir / projections_file, mmap_mode='r')
+
+    coefficients = open_memmap(
+        filename=str(projections_dir / 'coefficients.npy'),
+        mode='w+',  # create or overwrite file
+        dtype=np.complex64,
+        shape=(projections.shape[0], projections.shape[1], num_basis)
+    )
+
+    chunks = int(np.ceil(len(projections) / chunk_size))
+    
+    # coefficients = []
+    for i in tqdm(
+        range(chunks),
+        f"[{datetime.now().strftime('%H:%M:%S')}] Projecting waveforms to reduced basis",
+        disable=not verbose,
+    ):        
+        # set up chunking indices
+        start = i * chunk_size
+        if i == chunks - 1:
+            end = len(projections)
+        else:
+            end = (i+1)*chunk_size
+
+        # batch matrix multiplication
+        waveform = torch.tensor(projections[start:end].astype(np.complex64))
+        coefficients[start:end] = torch.einsum('bij, ijk -> bik', waveform, V).numpy()
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Arguments for randomized SVD fitting code.')
@@ -583,6 +631,11 @@ if __name__ == '__main__':
     parser.add_argument(
         '-n', '--num_basis', dest='num_basis', default=1000,
         type=int, help="Number of reduced basis elements to fit."
+    )
+
+    parser.add_argument(
+        '-c', '--chunk_size', dest='chunk_size', default=2000,
+        type=int, help="Chunk size for array programming (i.e. coefficient generation)."
     )
     
     parser.add_argument(
@@ -605,13 +658,21 @@ if __name__ == '__main__':
         '-o', '--out_dir', dest='out_dir',
         type=str, help='The output directory to save generated reduced basis files.'
     )
-    
+        
     parser.add_argument(
-        '-f', '--file_name', default='parameters.csv', dest='file_name',
-        type=str, help='The output .csv file name to save the generated parameters.'
+        '--projections_dir',
+        type=str, help='The output directory to load projections for basis coefficients generation.'
     )
     
-    parser.add_argument('--overwrite', default=False, action="store_true", help="Whether to overwrite files if they already exists.")
+    parser.add_argument(
+        '-f', '--folder_name', default='reduced_basis', dest='folder_name',
+        type=str, help='The output folder to store reduced basis data.'
+    )
+    
+    parser.add_argument(
+        '--overwrite', default=False, action="store_true",
+        help="Whether to overwrite files if they already exists."
+    )
 
     # random seed
     # parser.add_argument('--seed', type=int")  # to do
@@ -620,6 +681,12 @@ if __name__ == '__main__':
 #     help="Set the logging level"
 #     )
     
+    parser.add_argument(
+        '--coefficients',
+        default=False, action="store_true",
+        help="If true, generate coefficients from basis projectoin; otherwise generate a reduced basis."
+    )
+
     parser.add_argument(
         '-v', '--verbose', dest='verbose',
         default=False, action="store_true",
@@ -639,4 +706,15 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
-    fit_randomized_svd(**args.__dict__)
+    if args.coefficients:
+        func_args = {
+            key: val for key, val in args.__dict__.items()
+            if key not in ('coefficients', 'pytorch', 'folder_name', 'out_dir')
+        }
+        generate_coefficients(**func_args)
+    else:
+        func_args = {
+            key: val for key, val in args.__dict__.items()
+            if key not in ('coefficients', 'projections_dir')
+        }
+        generate_basis(**func_args)

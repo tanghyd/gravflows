@@ -1,13 +1,12 @@
 import os
-import signal
-import traceback
 import logging
+import argparse
+import traceback
+import signal
 
 from pathlib import Path
-from typing import List
-from argparse import ArgumentParser
+from typing import Union, List
 
-import time
 from tqdm import tqdm
 from datetime import datetime, timedelta
 
@@ -15,7 +14,6 @@ import numpy as np
 import pandas as pd
 
 import matplotlib.pyplot as plt
-
 import corner
 
 import torch
@@ -29,19 +27,13 @@ import torch.multiprocessing as mp
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
 
-import pycbc.psd
-from pycbc.catalog import Merger
-
 import bilby
+from pycbc.catalog import Merger
 
 # local imports
 from models import flows
 
-from gwpe.utils import read_ini_config
-from gwpe.noise import NoiseTimeline, load_psd_from_file, get_tukey_window
-from gwpe.parameters import ParameterGenerator
-from gwpe.pytorch.waveforms import WaveformDataset
-from gwpe.pytorch.basis import BasisEncoder
+from gwpe.pytorch.datasets import BasisCoefficientsDataset
 
 def setup_nccl(rank, world_size):
     os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
@@ -52,6 +44,70 @@ def setup_nccl(rank, world_size):
 def cleanup_nccl():
     distributed.destroy_process_group()
 
+def generate_gw150914_context(
+    n: int,
+    noise_dir: Union[str, os.PathLike],
+    psd_dir: Union[str, os.PathLike],
+    basis_dir: Union[str, os.PathLike],
+    static_args_ini: str,
+    event_args_ini: str='gwpe/config_files/event_args.ini',
+    ifos: List[str]=['H1','L1'],
+    verbose: bool=False,
+):
+    """Function loads GW150914 segment from O1 dataset, applies signal processing steps
+    such as whitening and low-pass filtering, then projects to reduced basis coefficients."""
+    from gwpe.utils import read_ini_config
+    from gwpe.noise import NoiseTimeline, get_tukey_window, load_psd_from_file
+    from gwpe.basis import SVDBasis
+
+    _, static_args = read_ini_config(static_args_ini)
+    _, event_args = read_ini_config(event_args_ini)
+
+    basis = SVDBasis(basis_dir, static_args_ini, ifos, preload=False)
+    basis.load(time_translations=False, verbose=verbose)
+    if n is not None: basis.truncate(n)
+
+    # get GW150914 Test data
+    timeline = NoiseTimeline(data_dir=noise_dir, ifos=ifos)
+    strains = timeline.get_strains(
+        int(Merger('GW150914').time - event_args['seconds_before_event']),
+        int(event_args['waveform_length'])
+    )
+
+    psds = {}
+    for ifo in ifos:
+        # coloured noise from psd
+        psd_file = Path(psd_dir) / f'{ifo}_PSD.npy'
+        assert psd_file.is_file(), f"{psd_file} does not exist."
+        psds[ifo] = load_psd_from_file(psd_file, delta_f=event_args['delta_f'])
+
+    event_strain = np.empty((1, len(ifos), static_args['fd_length']), dtype=np.complex64)
+    for i, ifo in enumerate(strains):
+        # whiten with settings associated to longer strain
+        strain = strains[ifo] * get_tukey_window(event_args['sample_length'])  # hann window
+        strain = strain.to_frequencyseries(delta_f=event_args['delta_f'])  # fft
+        strain /= psds[ifo]**0.5    # whiten
+        strain[:int(event_args['f_lower'] / event_args['delta_f'])] = 0.  # lowpass filter
+        
+        # time slice to specified length and reset x axis to new time 
+        event_time = (event_args['seconds_before_event'] + Merger('GW150914').time % 1)
+        start_time = event_time - static_args['seconds_before_event']
+        end_time = start_time + (static_args['td_length'] * static_args['delta_t'])
+        strain.start_time = 0.
+        
+        strain = strain.to_timeseries()  # ifft
+        strain = strain.time_slice(start_time, end_time)
+        
+        # save frequency domain waveform for values up to 1024Hz
+        event_strain[:, i] = strain.to_frequencyseries(delta_f=static_args['delta_f'])[:static_args['fd_length']]
+
+    coefficients = np.stack([(event_strain[:, i, :] @ basis.V[i]) for i in range(event_strain.shape[1])], axis=1)
+    
+    # flatten for 1-d residual network input
+    coefficients = np.concatenate([coefficients.real, coefficients.imag], axis=1)
+    coefficients = coefficients.reshape(coefficients.shape[0], coefficients.shape[1]*coefficients.shape[2])
+    
+    return coefficients
 
 def tensorboard_writer(
     queue: mp.Queue,
@@ -83,8 +139,7 @@ def tensorboard_writer(
     bilby_df = pd.DataFrame(bilby_samples.astype(np.float32), columns=bilby_parameters)
     bilby_df = bilby_df.rename(columns={'luminosity_distance': 'distance', 'geocent_time': 'time'})
     bilby_df = bilby_df.loc[:, parameters]
-
-    labels=labels[:13]
+    
     domain = [
         [25, 60],  # mass 1
         [15, 50],  # mass 2
@@ -99,7 +154,7 @@ def tensorboard_writer(
         [0,np.pi],  # psi
         [0.4,3.4],  # ra
         [-np.pi/2,.1],  # dec
-        [0.005,0.055],  # tc
+        # [0.005,0.055],  # tc
         [100,800],  # distance
     ]
 
@@ -111,67 +166,41 @@ def tensorboard_writer(
 
     while True:
         try:
-            epoch, scalars, figures = queue.get()
+            epoch, scalars, samples = queue.get()
             
             for key, value in scalars.items():
                 tb.add_scalar(key, value, epoch)
             
-            if figures is not None:
-                for key, value in figures.items():
-                    
-                    if key == 'posteriors/gw150914':
-                        assert isinstance(value, torch.Tensor)
-                        samples_df = pd.DataFrame(value.numpy(), columns=parameters)
-                        weights = cosmoprior.prob(samples_df['distance'])
-                        weights = weights / np.mean(weights)
+            if samples is not None:
+                assert isinstance(samples, torch.Tensor)
+                samples_df = pd.DataFrame(samples.numpy(), columns=parameters)
+                weights = cosmoprior.prob(samples_df['distance'])
+                weights = weights / np.mean(weights)
 
-                        fig = corner.corner(
-                            bilby_df.iloc[:, :13],
-                            levels=[0.5, 0.9],
-                            scale_hist=True,
-                            plot_datapoints=False,
-                            labels=labels,
-                            color='red',
-                        )
+                fig = corner.corner(
+                    bilby_df,
+                    levels=[0.5, 0.9],
+                    scale_hist=True,
+                    plot_datapoints=False,
+                    labels=labels,
+                    color='red',
+                )
 
-                        corner.corner(
-                            samples_df.iloc[:, :13],
-                            levels=[0.5, 0.9],
-                            scale_hist=True,
-                            plot_datapoints=False,
-                            labels=labels,
-                            show_titles=True,
-                            fontsize=18,
-                            fig=fig,
-                            range=domain,
-                            weights=weights * len(bilby_samples) / len(samples_df),
-                        )
+                corner.corner(
+                    samples_df,
+                    levels=[0.5, 0.9],
+                    scale_hist=True,
+                    plot_datapoints=False,
+                    labels=labels,
+                    show_titles=True,
+                    fontsize=18,
+                    fig=fig,
+                    range=domain,
+                    weights=weights * len(bilby_samples) / len(samples_df),
+                )
 
-                        fig.suptitle('GW150914 Parameter Estimation: NSF (black) vs. Bilby (red)', fontsize=22)
-                        tb.add_figure(key, fig, epoch)
-
-                    elif key in ('posteriors/validation', 'posteriors/test', 'posteriors/train'):
-                        assert isinstance(value, tuple)
-                        samples, ground_truth = value  # unpack a tuple
-                        samples_df = pd.DataFrame(samples.numpy(), columns=parameters)
-                        weights = cosmoprior.prob(samples_df['distance'])
-                        weights = weights / np.mean(weights)
-
-                        fig = corner.corner(
-                            samples_df.iloc[:, :13],
-                            levels=[0.5, 0.9],
-                            scale_hist=True,
-                            plot_datapoints=False,
-                            labels=labels,
-                            show_titles=True,
-                            fontsize=18,
-                            # range=domain,
-                            truths=ground_truth[0].numpy()[:13],
-                            weights=weights * len(bilby_samples) / len(samples_df),
-                        )
-                        
-                        fig.suptitle(f"{key.split('/')[-1].replace('_', ' ').title()} Validation Sample: NSF (black) vs. Bilby (red)", fontsize=22)
-                        tb.add_figure(key, fig, epoch)
+                fig.suptitle('GW150914 Parameter Estimation: NSF (black) vs. Bilby (red)', fontsize=22)
+                tb.add_figure('posteriors/GW150914', fig, epoch)
 
             tb.flush()
 
@@ -180,119 +209,60 @@ def tensorboard_writer(
             os.kill(os.getpid(), signal.SIGSTOP)
 
 # Training with PyTorch native DataDistributedParallel (DDP)
-def train_distributed(
+def train(
     rank: int,
     world_size: int,
+    lr: float=5e-4,
+    batch_size: int=1000,
     epochs: int=500,
     interval: int=10,
     save: int=100,
+    num_workers: int=4,
+    num_basis: int=100,
     verbose: bool=False,
+    profile: bool=False,
 ):
-    
-    assert (0 <= interval) and (interval <= epochs), "Interval must be a positive integer between 0 and epochs."
+    assert 0 < batch_size, "batch_size must be a positive integer."
+    assert 0 < epochs, "epochs must be a positive integer."
+    assert (0 <= interval) and (interval <= epochs), "Interval must be a non-negative integer between 0 and epochs."
+    assert (0 <= save) and (save <= epochs), "Save must be a non-negative integer between 0 and epochs."
 
     # setup data distributed parallel training
     setup_nccl(rank, world_size)  # world size is total gpus
     torch.cuda.set_device(rank)  # rank is gpu index
-    device = torch.device('cuda')
 
     # directories
-    noise_dir = Path('/mnt/datahole/daniel/gwosc/O1')
-    psd_dir = Path("/mnt/datahole/daniel/gravflows/datasets/train/PSD/")
-    basis_dir = Path('/mnt/datahole/daniel/gravflows/datasets/basis/')
-    waveform_dir = Path('/mnt/datahole/daniel/gravflows/datasets/train/')
-    validation_dir = Path('/mnt/datahole/daniel/gravflows/datasets/validation/')
-    test_dir = Path('/mnt/datahole/daniel/gravflows/datasets/test/')
-    log_dir = f"{datetime.now().strftime('%b%d_%H-%M-%S')}_{os.uname().nodename}"  # tb
+    data_dir = Path('/mnt/datahole/daniel/gravflows/datasets/train/')
+    log_dir = f"{datetime.now().strftime('%b%d_%H-%M-%S')}_{os.uname().nodename}"
 
     save_dir = Path('gwpe/model_weights/')
     experiment_dir = save_dir / log_dir
     experiment_dir.mkdir(parents=True, exist_ok=True)
 
     # config files
-    waveform_params_ini = str(waveform_dir / 'config_files/parameters.ini')
-    projection_params_ini = 'gwpe/config_files/extrinsics.ini'
-    static_args_ini = str(waveform_dir / 'config_files/static_args.ini')
-    event_args_ini = 'gwpe/config_files/event_args.ini'  # GW150914 data
-    _, static_args = read_ini_config(static_args_ini)
-    _, event_args = read_ini_config(event_args_ini)
+    waveform_params_ini = str(data_dir / 'config_files/parameters.ini')
+    static_args_ini = str(data_dir / 'config_files/static_args.ini')
 
-    # parameter generator and standardization
-    generator = ParameterGenerator(config_files=[waveform_params_ini, projection_params_ini])
-    mean = torch.tensor(generator.statistics['mean'].values, device=device, dtype=torch.float32)
-    std = torch.tensor(generator.statistics['std'].values, device=device, dtype=torch.float32)
+    # validation
+    noise_dir = Path('/mnt/datahole/daniel/gwosc/O1')
+    psd_dir = Path("/mnt/datahole/daniel/gravflows/datasets/train/PSD/")
+    basis_dir = Path('/mnt/datahole/daniel/gravflows/datasets/basis/')
 
-    # handle parameter scaling for no time shift/distance scaling
-    # mean[generator.parameters.index('distance')] = 0.
-    # std[generator.parameters.index('distance')] = 1.
-    # mean[generator.parameters.index('time')] = 0.
-    # std[generator.parameters.index('time')] = 1.
+    # generate gw150914 sample as reduced basis - to do: implement on rank 0 then distribute
+    gw150914_context = generate_gw150914_context(num_basis, noise_dir, psd_dir, basis_dir, static_args_ini)
+    gw150914_context = torch.tensor(gw150914_context, device=rank)
+    gw150914_samples = None  # every "interval" we generate samples for vis, else None
 
-    # power spectral density
-    ifos = ('H1', 'L1')
-    # interferometers = {'H1': 'Hanford', 'L1': 'Livingston', 'V1': 'Virgo', 'K1': 'KAGRA'}
-
-    # setup asynchronous figure generation and tensorboard writer process
-    if rank == 0:  
-        queue = mp.SimpleQueue()
-        tb_process = mp.Process(
-            target=tensorboard_writer,
-            args=(queue, f'gwpe/runs/{log_dir}', generator.parameters, generator.latex)
-        )
-        tb_process.start()
-
-    psds = {}
-    for ifo in ifos:
-        # coloured noise from psd
-        psd_file = Path(psd_dir) / f'{ifo}_PSD.npy'
-        assert psd_file.is_file(), f"{psd_file} does not exist."
-        psds[ifo] = load_psd_from_file(psd_file, delta_f=event_args['delta_f'])
-
-    # get GW150914 Test data
-    timeline = NoiseTimeline(data_dir=noise_dir, ifos=ifos)
-    strains = timeline.get_strains(
-        int(Merger('GW150914').time - event_args['seconds_before_event']),
-        int(event_args['waveform_length'])
-    )
-
-    event_strain = {}
-    for ifo in strains:
-        # whiten with settings associated to longer strain
-        strain = strains[ifo] * get_tukey_window(event_args['sample_length'])  # hann window
-        strain = strain.to_frequencyseries(delta_f=event_args['delta_f'])  # fft
-        strain /= psds[ifo]**0.5    # whiten
-        strain[:int(event_args['f_lower'] / event_args['delta_f'])] = 0.  # lowpass filter
-        
-        # time slice to specified length and reset x axis to new time 
-        event_time = (event_args['seconds_before_event'] + Merger('GW150914').time % 1)
-        start_time = event_time - static_args['seconds_before_event']
-        end_time = start_time + (static_args['td_length'] * static_args['delta_t'])
-        strain.start_time = 0.
-        
-        strain = strain.to_timeseries()  # ifft
-        strain = strain.time_slice(start_time, end_time)
-        
-        # save frequency domain waveform for values up to 1024Hz
-        event_strain[ifo] = strain.to_frequencyseries(delta_f=static_args['delta_f'])[:static_args['fd_length']]
-
-    # training data set
-    batch_size = 1000
-
-    dataset = WaveformDataset(
-        data_dir=waveform_dir,
+    # training data
+    dataset = BasisCoefficientsDataset(
+        data_dir=data_dir,
         static_args_ini=static_args_ini,
-        intrinsics_ini=waveform_params_ini,
-        extrinsics_ini=projection_params_ini,
-        psd_dir=psd_dir,
-        ifos=ifos,
-        downcast=True,
-        scale=False,
-        shift=False,
+        parameters_ini=waveform_params_ini,
     )
 
     sampler = DistributedSampler(
         dataset,
-        shuffle=True,
+        shuffle=False,
         num_replicas=world_size,
         rank=rank,
         seed=rank,
@@ -301,24 +271,21 @@ def train_distributed(
     dataloader = DataLoader(
         dataset,
         shuffle=False,
-        num_workers=8,
+        num_workers=num_workers,
         batch_size=batch_size,
         sampler=sampler,
         pin_memory=True,
         persistent_workers=True,
+        prefetch_factor=4,
         worker_init_fn=dataset._worker_init_fn,
         collate_fn=dataset._collate_fn,
     )
 
-    val_dataset = WaveformDataset(
-        data_dir=validation_dir,
+    # validation data
+    val_dataset = BasisCoefficientsDataset(
+        data_dir=data_dir,
         static_args_ini=static_args_ini,
-        data_file='projections.npy',
-        psd_dir=psd_dir,
-        ifos=ifos,
-        downcast=True,
-        scale=False,
-        shift=False,
+        parameters_ini=waveform_params_ini,
     )
 
     val_sampler = DistributedSampler(
@@ -332,83 +299,36 @@ def train_distributed(
     val_loader = DataLoader(
         val_dataset,
         shuffle=False,
-        num_workers=4,
+        num_workers=num_workers,
         batch_size=batch_size,
         sampler=val_sampler,
         pin_memory=True,
-        persistent_workers=False,
+        prefetch_factor=2,
         worker_init_fn=val_dataset._worker_init_fn,
+        collate_fn=val_dataset._collate_fn,
     )
 
-    test_dataset = WaveformDataset(
-        data_dir=test_dir,
-        static_args_ini=static_args_ini,
-        data_file='projections.npy',
-        psd_dir=psd_dir,
-        ifos=ifos,
-        downcast=True,
-        scale=False,
-        shift=False,
-    )
+    # set torch profiling runs
+    # wait = 1  # ignore first batch
+    # warmup = 1
+    # active = 4
+    # repeat = 2
 
+    # tensorboard
+    if rank == 0:
+        # tb = SummaryWriter(f'gwpe/runs/{log_dir}')
+        queue = mp.SimpleQueue()
+        tb_process = mp.Process(
+            target=tensorboard_writer,
+            args=(queue, f'gwpe/runs/{log_dir}', dataset.generator.parameters, dataset.generator.latex)
+        )
+        tb_process.start()
 
-    # reduced basis encoder
-    n = 100  # number of reduced basis elements
-    encoder = BasisEncoder(basis_dir, n, torch.complex64)  # .pt checkpoint must be single precision
-    encoder.to(device=device)
-    encoder.load_state_dict(torch.load(basis_dir / f'basis_encoder_{n}.pt', map_location=device))
-    for param in encoder.parameters():
-        param.requires_grad = False
-    encoder.eval()
-
-    # validation data
-    if interval != 0:
-        if rank != 3:  # gpu3 will sample from training samples
-            with torch.no_grad():
-                if rank == 0:
-                    # generate samples for gw150914
-                    context = torch.tensor(np.stack(list(event_strain.values()))[None], dtype=torch.complex64, device=device)
-                    gts = torch.zeros((1,len(val_dataset.parameters.columns)), dtype=torch.float32, device=device)  # dummy tensor
-
-                elif rank == 1:
-                    idx = val_dataset.parameters.distance.argmin()
-
-                    # manually load projected waveforms and ground truths from file
-                    # this is to circumvent calling ._worker_init_fn() on the DataSet object before training
-                    context = np.load(val_dataset.data_dir / val_dataset.data_file, mmap_mode='r')[[idx]]
-                    context = torch.tensor(np.array(context), dtype=torch.complex64, device=device)
-                        
-                    # generate noise for whitened waveform above lowpass filter (i.e. >20Hz)
-                    lowpass = int(dataset.static_args['f_lower'] / dataset.static_args['delta_f'])
-                    size = (context.shape[0], context.shape[1], context.shape[2] - lowpass)
-                    context[:, :, lowpass:] += torch.randn(size, dtype=context.dtype, device=context.device)
-                        
-                    gts = val_dataset.parameters.iloc[[idx]].values
-                    gts = torch.tensor(val_dataset.parameters.iloc[[idx]].values, dtype=torch.float32, device=device)
-
-                    # idx = val_dataset.parameters.loc[
-                    #     val_dataset.parameters.distance == val_dataset.parameters.distance.quantile(interpolation='nearest')
-                    # ].index[0]
-                
-                elif rank == 2:
-                    
-                    idx = test_dataset.parameters.distance.argmin()
-                    context = np.load(test_dataset.data_dir / test_dataset.data_file, mmap_mode='r')[[idx]]
-                    context = torch.tensor(np.array(context), dtype=torch.complex64, device=device)
-
-                    gts = test_dataset.parameters.iloc[[idx]].values
-                    gts = torch.tensor(test_dataset.parameters.iloc[[idx]].values, dtype=torch.float32, device=device)
-                    
-                # context = encoder(context)
-                context = torch.einsum('bij, bijk -> bik', context, encoder.basis) * encoder.scaler
-                context = torch.cat([context.real, context.imag], dim=1)
-                context = context.reshape(context.shape[0], context.shape[1]*context.shape[2])
-
-
+    # instantiate neural spline coupling flow
     flow = flows.create_NDE_model(
-        input_dim=15, 
-        context_dim=4*n,
-        num_flow_steps=30,
+        input_dim=14,  # we do not predict coalescence time 
+        context_dim=4*num_basis,
+        num_flow_steps=20,
         base_transform_kwargs={
             'base_transform_type': 'rq-coupling',
             'batch_norm': True,
@@ -419,16 +339,24 @@ def train_distributed(
 
     # sync_bn_flow = nn.SyncBatchNorm.convert_sync_batchnorm(flow)
     flow = DDP(flow.to(rank), device_ids=[rank], output_device=rank)
-    optimizer = torch.optim.Adam(flow.parameters(), lr=5e-4)
+    optimizer = torch.optim.Adam(flow.parameters(), lr=lr)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
 
     # run training loop
     flow.train()
-    train_loss = torch.zeros((1,), device=device, requires_grad=False)
-    val_loss = torch.zeros((1,), device=device, requires_grad=False)
+    train_loss = torch.zeros((1,), device=rank, requires_grad=False)
+    val_loss = torch.zeros((1,), device=rank, requires_grad=False)
 
     disable_pbar = False if verbose and (rank == 0) else True  # tqdm progress bar
     with tqdm(total=len(dataloader)*epochs, disable=disable_pbar) as progress:
+        # with torch.profiler.profile(
+        #     activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+        #     schedule=torch.profiler.schedule(wait=wait, warmup=warmup, active=active, repeat=repeat),
+        #     on_trace_ready=torch.profiler.tensorboard_trace_handler(f'gwpe/runs/{log_dir}'),
+        #     record_shapes=True,
+        #     with_stack=True
+        # ) as profiler:
+
         for epoch in range(1, 1+epochs):
             if rank == 0:
                 progress.set_postfix({'epoch': epoch})
@@ -436,92 +364,80 @@ def train_distributed(
 
             # let all processes sync up before starting with a new epoch of training
             distributed.barrier()
-
-            iterator = iter(dataloader)
-            projections, parameters = next(iterator) 
-
-            projections = projections.to(device, non_blocking=True)
-            parameters = parameters.to(device, non_blocking=True)
+            iterator = iter(enumerate(dataloader))
+            step, (coefficients, parameters) = next(iterator)
             
+            coefficients = coefficients.to(rank, non_blocking=True)
+            parameters = parameters.to(rank, non_blocking=True)
+
             complete = False
             while not complete:
                 optimizer.zero_grad()
 
-                # generate noise for whitened waveform above lowpass filter (i.e. >20Hz)
-                lowpass = int(dataset.static_args['f_lower'] / dataset.static_args['delta_f'])
-                size = (projections.shape[0], projections.shape[1], projections.shape[2] - lowpass)
-                projections[:, :, lowpass:] += torch.randn(size, dtype=projections.dtype, device=projections.device)
-
-                # project to reduced basis and flatten for 1-d residual network input
-                coefficients = encoder(projections)
-                coefficients = torch.cat([coefficients.real, coefficients.imag], dim=1)
-                coefficients = coefficients.reshape(coefficients.shape[0], coefficients.shape[1]*coefficients.shape[2])
-
+                # if profile:
+                    # https://github.com/guyang3532/kineto/blob/readme/tb_plugin/docs/gpu_utilization.md
+                    ## WARNING: profiler may not handle async pinned memory transfer properly?
+                    # i.e. may not record CPU vs GPU wall times correctly
+                    # may be related to reported blocks per SM/achieved occupancy negative bug
+                    # this was an open issue for pytorch 1.9 as of july 9 - nightly may fix it
+                    # https://github.com/pytorch/kineto/issues/325#issuecomment-869362218
+                    # if (step >= (wait + warmup + active) * repeat):
+                    #     break
 
                 # negative log-likelihood conditional on strain over mini-batch
                 loss = -flow.module.log_prob(parameters, context=coefficients).mean()
-                # print(f"rank {rank}: train loss: {loss.detach().item()}")
 
                 try:
                     # async get data from CPU and move to GPU during model forward
-                    projections, parameters = next(iterator) 
-                    projections = projections.to(device, non_blocking=True)
-                    parameters = parameters.to(device, non_blocking=True)
+                    step, (coefficients, parameters) = next(iterator)
+                    
+                    coefficients = coefficients.to(rank, non_blocking=True)
+                    parameters = parameters.to(rank, non_blocking=True)
 
                 except StopIteration:
                     # exit while loop if iterator is complete
                     complete = True
-
+                    
                 loss.backward()
                 optimizer.step()
                 scheduler.step()
+                # if profile: profiler.step()
 
                 # total loss summed over each sample in batch
                 train_loss += loss.detach() * coefficients.shape[0]
                 if rank == 0: progress.update(1)
 
+
             # gather total loss during epoch between each GPU worker as list of tensors
             world_loss = [torch.ones_like(train_loss) for _ in range(world_size)]
             distributed.all_gather(world_loss, train_loss)
             train_loss *= 0.0  # reset loss for next epoch
-                
+            
             if (interval != 0) and (epoch % interval == 0):
                 if rank==0:
                     progress.set_description(f'[{log_dir}] Validating', refresh=True)
 
                 with torch.no_grad():
-                    # evaluation on noisy validation set 
-                    iterator = iter(val_loader)
-                    projections, parameters = next(iterator)
-                    projections = projections.to(device, dtype=torch.complex64, non_blocking=True)
-                    parameters = parameters.to(device, dtype=torch.float32, non_blocking=True)
-            
+                    # evaluate model on validation dataset
+
+                    iterator = iter(enumerate(val_loader))
+                    step, (coefficients, parameters) = next(iterator)
+                    
+                    coefficients = coefficients.to(rank, non_blocking=True)
+                    parameters = parameters.to(rank, non_blocking=True)
+
                     complete = False
                     while not complete:
-                        optimizer.zero_grad()
-
-                        # generate noise for whitened waveform above lowpass filter (i.e. >20Hz)
-                        lowpass = int(dataset.static_args['f_lower'] / dataset.static_args['delta_f'])
-                        size = (projections.shape[0], projections.shape[1], projections.shape[2] - lowpass)
-                        projections[:, :, lowpass:] += torch.randn(size, dtype=projections.dtype, device=projections.device)
-
-                        # project to reduced basis and flatten for 1-d residual network input
-                        coefficients = encoder(projections)
-                        coefficients = torch.cat([coefficients.real, coefficients.imag], dim=1)
-                        coefficients = coefficients.reshape(coefficients.shape[0], coefficients.shape[1]*coefficients.shape[2])
-
-                        # validation does not use collate_fn so we need to manually standardize
-                        parameters = (parameters - mean ) / std
 
                         # negative log-likelihood conditional on strain over mini-batch
                         loss = -flow.module.log_prob(parameters, context=coefficients).mean()
-                        # print(f"rank {rank}: val loss: {loss.detach().item()}")
 
                         try:
                             # async get data from CPU and move to GPU during model forward
-                            projections, parameters = next(iterator) 
-                            projections = projections.to(device, dtype=torch.complex64, non_blocking=True)
-                            parameters = parameters.to(device, dtype=torch.float32, non_blocking=True)
+                            step, (coefficients, parameters) = next(iterator)
+                            
+                            coefficients = coefficients.to(rank, non_blocking=True)
+                            parameters = parameters.to(rank, non_blocking=True)
 
                         except StopIteration:
                             # exit while loop if iterator is complete
@@ -535,115 +451,78 @@ def train_distributed(
                     distributed.all_gather(world_val_loss, val_loss)
                     val_loss *= 0.0  # reset loss for next epoch
 
-                    # validation posteriors
-                    if rank==0:
-                        progress.set_description(f'[{log_dir}] Sampling posteriors', refresh=True)
+                # validation posteriors
+                if rank==0:
+                    progress.set_description(f'[{log_dir}] Sampling posteriors', refresh=True)
 
-                    # sample posteriors from training
-                    if rank==3:
-                        # first sample in final batch (random)
-                        context = coefficients[0]
-                        gts = parameters[0]
+                samples = flows.sample_flow(
+                    flow.module,
+                    n=5000,
+                    context=gw150914_context,
+                    output_device='cuda',
+                    dtype=torch.float32,
+                )[0]
 
-                    samples = flows.sample_flow(
-                        flow.module,
-                        n=25000,
-                        context=context,
-                        output_device='cuda',
-                        dtype=torch.float32,
-                    )
+                # gather samples from all gpus
+                gw150914_samples = [torch.ones_like(samples) for _ in range(world_size)]
+                distributed.all_gather(gw150914_samples, samples)
 
-                    # undo standardized sampled parameters
-                    samples = (samples[0] * std) + mean
-
-                    # gather samples from all gpus
-                    world_samples = [torch.ones_like(samples) for _ in range(world_size)]
-                    distributed.all_gather(world_samples, samples)
-
-                    world_gts = [torch.ones_like(gts) for _ in range(world_size)]
-                    distributed.all_gather(world_gts, gts)
-
-
-            if rank == 0:
-                progress.set_description(f'[{log_dir}] Sending to TensorBoard', refresh=True)
-                
-                scalars = {
-                    'loss/train': torch.cat(world_loss).sum().item() / len(dataloader.dataset)
-                } 
-                
-                figures = None  # reset to None for epochs where there is no corner plot
-                if (interval != 0) and (epoch % interval == 0):
-                    scalars['loss/validation'] = torch.cat(world_val_loss).sum().item() / len(val_loader.dataset)
-
-                    # to do - set up this process for num_gpus < 4
-                    figures = {}
-                    world_gts = [gts.cpu() for gts in world_gts]
-                    world_samples = [world_sample.cpu() for world_sample in world_samples]
-                    for i, (world_sample, gt) in enumerate(zip(world_samples, world_gts)):
-                        # data is sent as tuples - .share_memory_() must be called manually
-                        world_sample.share_memory_()
-                        gt.share_memory_()
-
-                        # i should correspond to gpu rank of origin
-                        if i == 0:
-                            figures['posteriors/gw150914'] = world_sample
-                        elif i == 1:
-                            figures['posteriors/validation'] = (world_sample, gt)
-                        elif i == 2:
-                            figures['posteriors/test'] = (world_sample, gt)
-                        elif i == 3:
-                            figures['posteriors/train'] = (world_sample, gt)
-
-                # send data to async process to generate matplotlib figures
-                queue.put((epoch, scalars, figures))
-
-                if (save != 0) and (epoch % save == 0):
-                    # save checkpoint and write computationally expensive data to tb
-                    torch.save(flow.module.state_dict(), experiment_dir / f'flow_{epoch}.pt')
-                    torch.save(optimizer.state_dict(), experiment_dir / f'optimizer_{epoch}.pt')
-
-        # destroy processes from distributed training
-        if rank == 0:
-            tb_process.terminate()
+        if (rank == 0) and not profile:
+            progress.set_description(f'[{log_dir}] Sending to TensorBoard', refresh=True)
             
-        cleanup_nccl()
+            scalars = {
+                'loss/train': torch.cat(world_loss).sum().item() / len(dataloader.dataset)
+            } 
+            
+            if (interval != 0) and (epoch % interval == 0):
+
+                scalars['loss/validation'] = torch.cat(world_val_loss).sum().item() / len(val_loader.dataset)
+
+                # convert gw150914 samples to cpu and undo standardization
+                gw150914_samples = torch.cat(gw150914_samples).cpu()
+                gw150914_samples = (gw150914_samples * dataset.std) + dataset.mean
+                
+            # send data to async process to generate matplotlib figures
+            queue.put((epoch, scalars, gw150914_samples))
+            gw150914_samples = None   # reset to None for epochs where there is no corner plot
+
+            if (save != 0) and (epoch % save == 0):
+                # save checkpoint and write computationally expensive data to tb
+                torch.save(flow.module.state_dict(), experiment_dir / f'flow_{epoch}.pt')
+                torch.save(optimizer.state_dict(), experiment_dir / f'optimizer_{epoch}.pt')
+
+    # destroy processes from distributed training
+    if rank == 0:
+        tb_process.terminate()
+        
+    cleanup_nccl()
 
 if __name__ == '__main__':
-    parser = ArgumentParser()
+    parser = argparse.ArgumentParser()
 
     # training settings
     parser.add_argument('--num_gpus', type=int, default=1)
+    parser.add_argument('--lr', type=float, default=5e-4)
+    parser.add_argument('--batch_size', type=int, default=1000)
     parser.add_argument('--epochs', type=int, default=10)
     parser.add_argument('--interval', type=int, default=2)
     parser.add_argument('--save', type=int, default=10)
+    parser.add_argument('--num_workers', type=int, default=4, help="Number of workers for dataloader.")
     parser.add_argument('--verbose', default=False, action="store_true")
-
-    # data directories
-    # parser.add_argument('-d', '--data_dir', dest='data_dir', type=str, help='The input directory to load parameter files.')
-    # parser.add_argument('-o', '--out_dir', dest='out_dir', type=str, help='The output directory to save generated waveform files.')
-    # parser.add_argument('--psd_dir', dest='psd_dir', type=str, help='The output directory to save generated waveform files.')
+    parser.add_argument('--profile', default=False, action="store_true")
 
     # logging
-
     logging.getLogger('bilby').setLevel(logging.INFO)
-
 
     args = parser.parse_args()
 
     assert isinstance(args.num_gpus, int), "num_gpus argument must be an integer."
     assert args.num_gpus > 0 and args.num_gpus <= torch.cuda.device_count(), f"{args.num_gpus} not a valid number of GPU devices."
 
-
-    # run pytorch training
-    if args.num_gpus == 1:
-        raise NotImplementedError()
-        train()
-
-    else:
-        # data distributed parallel
-        mp.spawn(
-            train_distributed,
-            args=(args.num_gpus, args.epochs, args.interval, args.save, args.verbose),
-            nprocs=args.num_gpus,
-            join=True
-        )
+    # data distributed parallel
+    mp.spawn(
+        train,
+        args=tuple(args.__dict__.values()),  # assumes parser loaded in correct order
+        nprocs=args.num_gpus,
+        join=True
+    )

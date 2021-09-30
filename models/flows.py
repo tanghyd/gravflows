@@ -25,19 +25,20 @@ def create_linear_transform(param_dim):
     ])
 
 
-def create_base_transform(i,
-                          param_dim,
-                          context_dim=None,
-                          hidden_dim=512,
-                          num_transform_blocks=5,
-                          activation='relu',
-                          dropout_probability=0.0,
-                          batch_norm=False,
-                          num_bins=8,
-                          tail_bound=1.,
-                          apply_unconditional_transform=False,
-                          base_transform_type='rq-coupling'
-                          ):
+def create_base_transform(
+    i,
+    param_dim,
+    context_dim=None,
+    hidden_dim=512,
+    num_transform_blocks=5,
+    activation='relu',
+    dropout_probability=0.0,
+    batch_norm=False,
+    num_bins=8,
+    tail_bound=1.,
+    apply_unconditional_transform=False,
+    base_transform_type='rq-coupling'
+):
     """Build a base NSF transform of x, conditioned on y.
 
     This uses the PiecewiseRationalQuadraticCoupling transform or
@@ -98,18 +99,19 @@ def create_base_transform(i,
         return transforms.PiecewiseRationalQuadraticCouplingTransform(
             mask=utils.create_alternating_binary_mask(
                 param_dim, even=(i % 2 == 0)),
-            transform_net_create_fn=(lambda in_features, out_features:
-                                    nets.ResidualNet(
-                                        in_features=in_features,
-                                        out_features=out_features,
-                                        hidden_features=hidden_dim,
-                                        context_features=context_dim,
-                                        num_blocks=num_transform_blocks,
-                                        activation=activation_fn,
-                                        dropout_probability=dropout_probability,
-                                        use_batch_norm=batch_norm
-                                    )
-                                    ),
+            transform_net_create_fn=(
+                lambda in_features, out_features:
+                    nets.ResidualNet(
+                        in_features=in_features,
+                        out_features=out_features,
+                        hidden_features=hidden_dim,
+                        context_features=context_dim,
+                        num_blocks=num_transform_blocks,
+                        activation=activation_fn,
+                        dropout_probability=dropout_probability,
+                        use_batch_norm=batch_norm
+                    )
+                ),
             num_bins=num_bins,
             tails='linear',
             tail_bound=tail_bound,
@@ -166,25 +168,6 @@ def create_transform(
 
 
     """
-    # transform = transforms.CompositeTransform([
-    #     transforms.CompositeTransform([
-    #         create_linear_transform(param_dim),
-    #         create_base_transform(
-    #             i,
-    #             param_dim,
-    #             context_dim=context_dim,
-    #             **base_transform_kwargs
-    #         )
-    #     ]) for i in range(num_flow_steps)
-    # ] + [
-    #     create_linear_transform(param_dim)
-    # ])
-
-    # This architecture has been re-compartmentalized to have an initial linear
-    # transform, followed by pairs of (NSF, linear) transforms. The architecture
-    # should be exactly the same as in lfigw/nde_flows.py but intermediate layers
-    # have been grouped differently for ease of visualising intermediate predictions.
-
     transform = transforms.CompositeTransform([
         transforms.CompositeTransform([
             create_linear_transform(param_dim),
@@ -194,18 +177,37 @@ def create_transform(
                 context_dim=context_dim,
                 **base_transform_kwargs
             )
-        ]) for i in range(num_flow_steps-1)
-    ] + [transforms.CompositeTransform([
-            create_linear_transform(param_dim),
-            create_base_transform(
-                num_flow_steps-1,
-                param_dim,
-                context_dim=context_dim,
-                **base_transform_kwargs
-            ),
-            create_linear_transform(param_dim)
-        ])]
-    )
+        ]) for i in range(num_flow_steps)
+    ] + [
+        create_linear_transform(param_dim)
+    ])
+
+    # This architecture has been re-compartmentalized to have an initial linear
+    # transform, followed by pairs of (NSF, linear) transforms. The architecture
+    # should be exactly the same as in lfigw/nde_flows.py but intermediate layers
+    # have been grouped differently for ease of visualising intermediate predictions.
+
+    # transform = transforms.CompositeTransform([
+    #     transforms.CompositeTransform([
+    #         create_linear_transform(param_dim),
+    #         create_base_transform(
+    #             i,
+    #             param_dim,
+    #             context_dim=context_dim,
+    #             **base_transform_kwargs
+    #         )
+    #     ]) for i in range(num_flow_steps-1)
+    # ] + [transforms.CompositeTransform([
+    #         create_linear_transform(param_dim),
+    #         create_base_transform(
+    #             num_flow_steps-1,
+    #             param_dim,
+    #             context_dim=context_dim,
+    #             **base_transform_kwargs
+    #         ),
+    #         create_linear_transform(param_dim)
+    #     ])]
+    # )
 
     return transform
 
@@ -235,7 +237,6 @@ def create_NDE_model(input_dim, context_dim, num_flow_steps,
     flow = flows.Flow(transform, distribution)
 
     # Store hyperparameters - useful for loading from file.
-
     flow.model_hyperparams = {
         'input_dim': input_dim,
         'num_flow_steps': num_flow_steps,
