@@ -24,6 +24,7 @@ class BasisCoefficientsDataset(Dataset):
     def __init__(
         self,
         data_dir: Union[str, os.PathLike],
+        basis_dir: Union[str, os.PathLike],
         static_args_ini: str,
         parameters_ini: str,
         data_file: str='coefficients.npy',
@@ -34,6 +35,10 @@ class BasisCoefficientsDataset(Dataset):
         # configure data and settings
         self.data_file = data_file
         self.data_dir = Path(data_dir)
+
+        # load basis coefficient standardization scaler
+        self.basis_dir = Path(basis_dir)
+        self.standardization = np.load(basis_dir / 'reduced_basis'/ 'standardization.npy')
         
         # ground truth parameters
         self.parameters = pd.read_csv(self.data_dir / 'parameters.csv', index_col=0).astype(np.float32)
@@ -55,6 +60,9 @@ class BasisCoefficientsDataset(Dataset):
 
         # parameter standardization
         parameters = (parameters - self.mean) / self.std
+        
+        # coefficient standardization truncated to match input data 
+        coefficients *= self.standardization[:, :coefficients.shape[2]]
 
         # flatten for 1-d residual network input
         coefficients = np.concatenate([coefficients.real, coefficients.imag], axis=1)

@@ -33,7 +33,10 @@ from pycbc.waveform import (
 
 # local imports
 from .utils import read_ini_config, match_precision
-from .noise import load_psd_from_file, frequency_noise_from_psd
+from .noise import (
+    load_psd_from_file, frequency_noise_from_psd,
+    get_noise_std_from_static_args,
+)
 
 def source_frame_to_radiation(
     mass_1: float, mass_2: float, phase: float, theta_jn: float, phi_jl: float,
@@ -420,7 +423,7 @@ def generate_waveform_dataset(
     params_file: str='parameters.csv',
     ifos: Optional[List[str]]=None,
     add_noise: bool=False,
-    gaussian: bool=False,
+    gaussian: bool=True,
     psd_dir: Optional[str]=None,
     whiten: bool=True,
     ref_ifo: Optional[str]=None,
@@ -517,7 +520,8 @@ def generate_waveform_dataset(
         )
 
         if add_noise:
-            # noise_std = get_noise_std_from_static_args(static_args)
+            # noise standardization factor
+            noise_std = get_noise_std_from_static_args(static_args)
             noise_file = out_dir / 'noise.npy'
             noise_memmap = open_memmap(
                 filename=noise_file,
@@ -633,7 +637,7 @@ def generate_waveform_dataset(
                             if gaussian or psd_dir is None:
                                 # gaussian white noise in frequency domain
                                 size = (end-start, static_args['fd_length'])  # gaussian for each batch for each freq bin
-                                noise[:, i, :] = (np.random.normal(0., 1., size) + 1j*np.random.normal(0., 1., size)).astype(dtype)
+                                noise[:, i, :] = (np.random.normal(0., noise_std, size) + 1j*np.random.normal(0., noise_std, size)).astype(dtype)
                             else:
                                 # coloured noise from psd -- cut to fd_length (bandpass filter for higher frequencies)
                                 noise[:, i, :] = frequency_noise_from_psd(psds[ifo], n=end-start)[:, :static_args['fd_length']]
@@ -691,6 +695,7 @@ if __name__ == '__main__':
 
     # signal processing
     parser.add_argument('--add_noise', default=False, action="store_true", help="Whether to add frequency noise - if PSDs are provided we add coloured noise, else Gaussian.")
+    # parser.add_argument('--noise_std', default=1.0, type=float, help="Noise standard deviation for generated white noise.")
     parser.add_argument('--gaussian', default=False, action="store_true", help="Whether to generate white gaussian nois when add_noise is True. If False, coloured noise is generated from a PSD.")
     parser.add_argument('--whiten', default=False, action="store_true", help="Whether to whiten the data with the provided PSD before fitting a reduced basis.")
     parser.add_argument('--lowpass', default=False, action="store_true", help="Whether to truncate the frequency domain data below 'f_lower' specified in the static args.")

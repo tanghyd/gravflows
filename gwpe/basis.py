@@ -574,6 +574,7 @@ def generate_coefficients(
     projections_file: str='projections.npy',
     ifos: List[str]=['H1', 'L1'],
     verbose: bool=True,
+    standardize: bool=False,
     overwrite: bool=False,
     validate: bool=False,
 ):
@@ -595,6 +596,7 @@ def generate_coefficients(
     if num_basis is not None: basis.truncate(num_basis)
 
     V = torch.from_numpy(basis.V)
+    standardization = torch.from_numpy(basis.standardization)
 
     projections = np.load(projections_dir / projections_file, mmap_mode='r')
 
@@ -622,7 +624,9 @@ def generate_coefficients(
 
         # batch matrix multiplication
         waveform = torch.tensor(projections[start:end].astype(np.complex64))
-        coefficients[start:end] = torch.einsum('bij, ijk -> bik', waveform, V).numpy()
+        coeff = torch.einsum('bij, ijk -> bik', waveform, V).numpy()
+        if standardize: coeff *= standardization
+        coefficients[start:end] = coeff
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Arguments for randomized SVD fitting code.')
@@ -688,6 +692,11 @@ if __name__ == '__main__':
     )
 
     parser.add_argument(
+        '--standardize', default=False, action="store_true",
+        help="Whether to standardize basis coefficients."
+    )
+
+    parser.add_argument(
         '-v', '--verbose', dest='verbose',
         default=False, action="store_true",
         help="Sets verbose mode to display progress bars."
@@ -715,6 +724,6 @@ if __name__ == '__main__':
     else:
         func_args = {
             key: val for key, val in args.__dict__.items()
-            if key not in ('coefficients', 'projections_dir')
+            if key not in ('coefficients', 'projections_dir', 'standardize')
         }
         generate_basis(**func_args)

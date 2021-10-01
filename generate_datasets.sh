@@ -101,7 +101,7 @@ python -m gwpe.waveforms \
 
 # Fit reduced basis with randomized SVD
 python -m gwpe.basis \
-    -n 500 \
+    -n 600 \
     -d "${dataset_dir}/basis/" \
     -s gwpe/config_files/static_args.ini \
     --overwrite \
@@ -117,6 +117,7 @@ python -m gwpe.waveforms \
     --ifos "H1" "L1" \
     --projections_only \
     --add_noise \
+    --gaussian \
     --lowpass \
     --whiten \
     --overwrite \
@@ -147,6 +148,7 @@ python -m gwpe.waveforms \
     --psd_dir "${dataset_dir}/validation/PSD/" \
     --ifos "H1" "L1" \
     --add_noise \
+    --gaussian \
     --lowpass \
     --whiten \
     --projections_only \
@@ -175,6 +177,7 @@ python -m gwpe.waveforms \
     --psd_dir "${dataset_dir}/test/PSD/" \
     --ifos "H1" "L1" \
     --add_noise \
+    --gaussian \
     --lowpass \
     --whiten \
     --projections_only \
