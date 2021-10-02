@@ -37,7 +37,7 @@ from pycbc.types import FrequencySeries
 from models import flows
 
 from gwpe.basis import SVDBasis
-from gwpe.pytorch.datasets import BasisCoefficientsDataset
+from gwpe.pytorch.datasets import BasisCoefficientsDataset, BasisEncoderDataset
 from gwpe.utils import read_ini_config
 from gwpe.utils.events import generate_gw150914_context
 
@@ -296,16 +296,32 @@ def train(
 
     # config files
     waveform_params_ini = str(data_dir / 'config_files/parameters.ini')
+    extrinsics_ini = 'gwpe/config_files/extrinsics.ini'
+
     static_args_ini = str(data_dir / 'config_files/static_args.ini')
 
     # validation
 
     # training data
-    dataset = BasisCoefficientsDataset(
+    # dataset = BasisCoefficientsDataset(
+    #     data_dir=data_dir,
+    #     basis_dir=basis_dir,
+    #     static_args_ini=static_args_ini,
+    #     parameters_ini=waveform_params_ini,
+    # )
+
+    dataset = BasisEncoderDataset(
+        n=num_basis,
         data_dir=data_dir,
         basis_dir=basis_dir,
         static_args_ini=static_args_ini,
-        parameters_ini=waveform_params_ini,
+        intrinsics_ini=waveform_params_ini,
+        extrinsics_ini=extrinsics_ini,
+        psd_dir=psd_dir,
+        ifos=['H1','L1'],
+        ref_ifo='H1',
+        downcast=True,
+        add_noise=True,
     )
 
     sampler = DistributedSampler(
@@ -324,7 +340,7 @@ def train(
         sampler=sampler,
         pin_memory=True,
         persistent_workers=True,
-        prefetch_factor=4,
+        prefetch_factor=2,
         worker_init_fn=dataset._worker_init_fn,
         collate_fn=dataset._collate_fn,
     )
@@ -334,7 +350,7 @@ def train(
         data_dir=val_dir,
         basis_dir=basis_dir,
         static_args_ini=static_args_ini,
-        parameters_ini=waveform_params_ini,
+        parameters_ini=[waveform_params_ini, extrinsics_ini],
     )
 
     val_sampler = DistributedSampler(
@@ -415,8 +431,8 @@ def train(
             args=(
                 queue,
                 f'gwpe/runs/{log_dir}',
-                dataset.generator.parameters,
-                dataset.generator.latex,
+                val_dataset.generator.parameters,
+                val_dataset.generator.latex,
                 static_args_ini,
                 num_basis,
                 val_coefficients,
@@ -434,7 +450,7 @@ def train(
         base_transform_kwargs={
             'base_transform_type': 'rq-coupling',
             'batch_norm': True,
-            'num_transform_blocks': 6,
+            'num_transform_blocks': 10,
             'activation': 'elu',
         }
     )
@@ -601,7 +617,11 @@ def train(
     if rank == 0:
         # to do - graceful way to shutdown workers
         # need to send message back from child process
-        time.sleep(10)
+        sleep_time = 120
+        for i in range(sleep_time):
+            progress.set_description(f'[{log_dir}] Shutting down in {sleep_time - i}s', refresh=True)
+            time.sleep(1)
+            
         tb_process.terminate()
         
     cleanup_nccl()
@@ -612,11 +632,11 @@ if __name__ == '__main__':
     # training settings
     parser.add_argument('--num_gpus', type=int, default=1)
     parser.add_argument('--lr', type=float, default=5e-4)
-    parser.add_argument('--batch_size', type=int, default=4096)
+    parser.add_argument('--batch_size', type=int, default=2048)
     parser.add_argument('--epochs', type=int, default=10)
     parser.add_argument('--interval', type=int, default=2)
     parser.add_argument('--save', type=int, default=10)
-    parser.add_argument('--num_workers', type=int, default=4, help="Number of workers for dataloader.")
+    parser.add_argument('--num_workers', type=int, default=6, help="Number of workers for dataloader.")
     parser.add_argument('--num_basis', type=int, default=100, help="Number of SVD reduced basis elements to use")
     parser.add_argument('--verbose', default=False, action="store_true")
     # parser.add_argument('--profile', default=False, action="store_true")

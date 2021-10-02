@@ -212,13 +212,14 @@ class BasisEncoder(nn.Module):
         mmap_mode: Optional[str]=None,
         time_translations: bool=False, 
         preload: bool=True,
+        verbose: bool=True,
     ):
         super().__init__()
         
         self.basis = SVDBasis(static_args_ini, data_dir, ifos, projections_file, preload=False)
 
         if preload:
-            self.load(mmap_mode=mmap_mode, time_translations=time_translations)
+            self.load(mmap_mode=mmap_mode, time_translations=time_translations, verbose=verbose)
         else:
             self.register_parameter('V', None)
             self.register_buffer('standardization', None)

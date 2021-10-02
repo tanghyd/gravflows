@@ -29,10 +29,10 @@ python -m gwpe.parameters \
     -n 1000000 \
     -d "${dataset_dir}/train/" \
     -c gwpe/config_files/intrinsics.ini \
-    -c gwpe/config_files/extrinsics.ini \
     --overwrite \
     --metadata \
     --verbose
+    # -c gwpe/config_files/extrinsics.ini \
 
 # validation data set
 python -m gwpe.parameters \
@@ -88,9 +88,9 @@ python -m gwpe.waveforms \
     -s gwpe/config_files/static_args.ini \
     --psd_dir "${dataset_dir}/basis/PSD/" \
     --ifos "H1" "L1" \
+    --projections_only \
     --lowpass \
     --whiten \
-    --projections_only \
     --overwrite \
     --verbose \
     --validate \
@@ -114,11 +114,11 @@ python -m gwpe.waveforms \
     -d "${dataset_dir}/train/" \
     -s gwpe/config_files/static_args.ini \
     --psd_dir "${dataset_dir}/train/PSD/" \
-    --ifos "H1" "L1" \
-    --projections_only \
+    --ref_ifo "H1" \
     --add_noise \
     --gaussian \
     --lowpass \
+    --whiten \
     --whiten \
     --overwrite \
     --verbose \
@@ -126,18 +126,20 @@ python -m gwpe.waveforms \
     --metadata \
     --chunk_size 10000 \
     --workers 12
+    # --projections_only \
+    # --ifos "H1" "L1" \
 
 # pre-generate coeffficients for training
-python -m gwpe.basis \
-    -n 100 \
-    -d "${dataset_dir}/basis/" \
-    -s gwpe/config_files/static_args.ini \
-    --projections_dir "${dataset_dir}/train/" \
-    --coefficients \
-    --overwrite \
-    --verbose \
-    --validate \
-    --chunk_size 5000
+# python -m gwpe.basis \
+#     -n 100 \
+#     -d "${dataset_dir}/basis/" \
+#     -s gwpe/config_files/static_args.ini \
+#     --projections_dir "${dataset_dir}/train/" \
+#     --coefficients \
+#     --overwrite \
+#     --verbose \
+#     --validate \
+#     --chunk_size 5000
 
 # Evaluation datasets
 
@@ -147,17 +149,18 @@ python -m gwpe.waveforms \
     -s gwpe/config_files/static_args.ini \
     --psd_dir "${dataset_dir}/validation/PSD/" \
     --ifos "H1" "L1" \
+    --ref_ifo "H1" \
     --add_noise \
     --gaussian \
     --lowpass \
     --whiten \
-    --projections_only \
     --overwrite \
     --verbose \
     --validate \
     --metadata \
     --chunk_size 5000 \
     --workers 12
+    # --projections_only \
     
 python -m gwpe.basis \
     -n 100 \
@@ -176,17 +179,18 @@ python -m gwpe.waveforms \
     -s gwpe/config_files/static_args.ini \
     --psd_dir "${dataset_dir}/test/PSD/" \
     --ifos "H1" "L1" \
+    --ref_ifo "H1" \
     --add_noise \
     --gaussian \
     --lowpass \
     --whiten \
-    --projections_only \
     --overwrite \
     --verbose \
     --validate \
     --metadata \
     --chunk_size 5000 \
     --workers 12
+    # --projections_only \
 
 python -m gwpe.basis \
     -n 100 \

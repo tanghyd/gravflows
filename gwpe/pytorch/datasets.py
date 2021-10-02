@@ -14,7 +14,7 @@ from pycbc.detector import Detector
 # local imports# local imports
 from ..utils import read_ini_config
 from ..parameters import ParameterGenerator
-from ..noise import load_psd_from_file
+from ..noise import get_noise_std_from_static_args, load_psd_from_file
 from ..waveforms import batch_project
 
 from .basis import BasisEncoder
@@ -50,8 +50,6 @@ class BasisCoefficientsDataset(Dataset):
         
     def _worker_init_fn(self, worker_id: int=None):
         self.data = np.load(self.data_dir / self.data_file, mmap_mode='r')
-
-        # print(f'Worker {worker_id} ready: encoder.basis: {self.encoder.V.shape} & dtype {self.encoder.V.dtype}!')
 
     def _collate_fn(self, batch: Tuple[np.ndarray]):
         # get data
@@ -96,12 +94,15 @@ class BasisEncoderDataset(Dataset):
         ref_ifo: Optional[str]=None,
         downcast: bool=False,
         add_noise: bool=False,
-        time_shift: bool=False,
+        # time_shift: bool=False,
     ):
         # load static argument file
         self.downcast = downcast
+        self.complex_dtype = np.complex64 if self.downcast else np.complex128
+        self.real_dtype = np.float32 if self.downcast else np.float64
+        
         self.add_noise = add_noise
-        self.time_shift = time_shift
+        # self.time_shift = time_shift
 
         _, self.static_args = read_ini_config(static_args_ini)
 
@@ -117,6 +118,8 @@ class BasisEncoderDataset(Dataset):
         self.ref_ifo = ref_ifo
         self.ifos = ifos
         
+        self.noise_std = get_noise_std_from_static_args(self.static_args)
+
         # ground truth parameters
         self.parameters = pd.read_csv(self.data_dir / 'parameters.csv', index_col=0)
         
@@ -130,9 +133,11 @@ class BasisEncoderDataset(Dataset):
         else:
             self.extrinsics = None
 
+        self.mean, self.std = np.concatenate([self.intrinsics.statistics.values, self.extrinsics.statistics.values]).T
+
         # reduced basis
         self.n = n  # number of reduced basis elements
-        self.encoder = BasisEncoder(self.basis_dir, static_args_ini, preload=False)
+        self.encoder = BasisEncoder(self.basis_dir, static_args_ini, preload=False, verbose=False)
 
         # the following are loaded with worker_init_fn on each process
         self.basis = None
@@ -152,22 +157,27 @@ class BasisEncoderDataset(Dataset):
                 psd = load_psd_from_file(self.psd_dir / f'{ifo}_PSD.npy')
                 asds.append(psd[:self.static_args['fd_length']] ** 0.5)
             self.asds = np.stack(asds)
+
+        if self.ref_ifo is not None:
+            # psd = load_psd_from_file(self.psd_dir / f'{self.ref_ifo}_PSD.npy')
+            self.asds /= self.asds[self.ifos.index(self.ref_ifo)]
         
+        self.asds = self.asds.astype(self.real_dtype)
+        self.parameters = self.parameters.astype(self.real_dtype)
+        self.mean = self.mean.astype(self.real_dtype)
+        self.std = self.std.astype(self.real_dtype)
 
         # reduced basis encoder - to do: put this in DataSet
         self.encoder.load(n=self.n, mmap_mode='r', verbose=True)
         for param in self.encoder.parameters():
             param.requires_grad = False
 
-        # print(f'Worker {worker_id} ready: encoder.basis: {self.encoder.V.shape} & dtype {self.encoder.V.dtype}!')
-
     def _collate_fn(self, batch: Tuple[np.ndarray]):
         # get data
-        dtype = np.complex64 if self.downcast else np.complex128
-        waveforms = np.stack([item[0] for item in batch]).astype(dtype)
+        waveforms = np.stack([item[0] for item in batch]).astype(self.complex_dtype)
         intrinsics = np.stack([item[1] for item in batch])
-        extrinsics = self.extrinsics.draw(waveforms.shape[0])  # generate in real time
-
+        extrinsics = self.extrinsics.draw(waveforms.shape[0])
+        
         # indices to set to zero for bandpass (and avoid noise generation)
         lowpass = int(self.static_args['f_lower'] / self.static_args['delta_f'])
 
@@ -179,24 +189,15 @@ class BasisEncoderDataset(Dataset):
                 extrinsics,  # np.recarray
                 waveforms,
                 self.static_args,
-                time_shift=self.time_shift,
+                time_shift=False,
             )
             
-        # filter out values less than f_lower (e.g. 20Hz) - to do: check truncation vs. zeroing
-        projections[:, : :lowpass] = 0.0  # may already be done in data generation.
-            
-        # whiten - warning: division by PSD not perfectly reliable unless we are in double precision
-        # 0.07s per call (batch_size=2000)
-        if self.ref_ifo is not None:
-              # broadcasted over batch
-            projections /= (self.asds / self.asds[self.ifos.index(self.ref_ifo)])[None]
-        else:
-            projections /= self.asds[None]
+        # whiten
+        projections /= self.asds[None]
 
         # parameter standardization
-        parameters = np.concatenate([intrinsics, np.array(extrinsics.tolist())], axis=1)
-        mean, std = np.concatenate([self.intrinsics.statistics.values, self.extrinsics.statistics.values]).T
-        parameters = (parameters - mean) / std
+        parameters = np.concatenate([intrinsics, np.array(extrinsics.tolist())], axis=1).astype(self.real_dtype)
+        parameters = (parameters - self.mean) / self.std
 
         # send to torch tensors
         projections = torch.from_numpy(projections)  # (batch, ifo, length)
@@ -204,19 +205,13 @@ class BasisEncoderDataset(Dataset):
 
         # generate noise for whitened waveform above lowpass filter (i.e. >20Hz)
         size = (projections.shape[0], projections.shape[1], projections.shape[2] - lowpass)
-        projections[:, :, lowpass:] += torch.randn(size, dtype=projections.dtype, device=projections.device)
+        projections[:, :, lowpass:] += torch.normal(0, self.noise_std, size, dtype=projections.dtype, device=projections.device)
+
+        # filter out values less than f_lower (e.g. 20Hz) - to do: check truncation vs. zeroing
+        projections[:, : :lowpass] = 0.0  # may already be done in data generation.
 
         # project to reduced basis and 
-        coefficients = self.encoder(projections)
-
-        # index to time shift manually
-        # time_idx = len(self.parameters.columns) + self.extrinsics.parameters.index('time')
-        # coefficients = self.encoder.time_translate(coefficients, parameters[:, time_idx])
-
-        # build and typecast data - 0.07s per call (0.14s total) (batch_size=2000)
-        if self.downcast:
-            coefficients = coefficients.to(torch.complex64)
-            parameters = parameters.to(torch.float32)
+        coefficients = self.encoder(projections, scale=True)
 
         # flatten for 1-d residual network input
         coefficients = torch.cat([coefficients.real, coefficients.imag], dim=1)
@@ -308,8 +303,6 @@ class WaveformDataset(Dataset):
                 asds.append(psd[:self.static_args['fd_length']] ** 0.5)
                 
             self.asds = np.stack(asds).astype(self.complex_dtype)
-        
-        # print(f'Worker {worker_id} ready!')
 
     def _collate_fn(self, batch: Tuple[np.ndarray]):
         # get data
