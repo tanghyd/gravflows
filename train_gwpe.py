@@ -139,7 +139,7 @@ def tensorboard_writer(
         [0, 2*np.pi],  # phi_jl
         [0, np.pi],  # theta_jn
         [0, np.pi],  # psi
-        [0, np.pi],  # ra
+        [0, 2*np.pi],  # ra
         [-np.pi/2, np.pi/2],  # dec
         # [0.005,0.055],  # tc
         [100,800],  # distance

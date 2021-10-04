@@ -5,7 +5,7 @@
 # # env DATASET_DIR=/fred/oz016/datasets/ bash generate_datasets.sh
 # # then we set it to be a default path
 
-dataset_dir=${DATASET_DIR:-"/mnt/datahole/daniel/gravflows/datasets"}
+dataset_dir=${DATASET_DIR:-"/mnt/datahole/daniel/gravflows/datasets_clean"}
 # dataset_dir=${DATASET_DIR:-"gwpe/datasets"}
 echo "Saving datasets to ${dataset_dir}/"
 
@@ -115,10 +115,7 @@ python -m gwpe.waveforms \
     -s gwpe/config_files/static_args.ini \
     --psd_dir "${dataset_dir}/train/PSD/" \
     --ref_ifo "H1" \
-    --add_noise \
-    --gaussian \
     --lowpass \
-    --whiten \
     --whiten \
     --overwrite \
     --verbose \
@@ -126,6 +123,8 @@ python -m gwpe.waveforms \
     --metadata \
     --chunk_size 10000 \
     --workers 12
+    # --add_noise \
+    # --gaussian \
     # --projections_only \
     # --ifos "H1" "L1" \
 
@@ -150,8 +149,6 @@ python -m gwpe.waveforms \
     --psd_dir "${dataset_dir}/validation/PSD/" \
     --ifos "H1" "L1" \
     --ref_ifo "H1" \
-    --add_noise \
-    --gaussian \
     --lowpass \
     --whiten \
     --overwrite \
@@ -160,6 +157,8 @@ python -m gwpe.waveforms \
     --metadata \
     --chunk_size 5000 \
     --workers 12
+    # --add_noise \
+    # --gaussian \
     # --projections_only \
     
 python -m gwpe.basis \

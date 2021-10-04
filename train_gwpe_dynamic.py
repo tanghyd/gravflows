@@ -56,6 +56,7 @@ def tensorboard_writer(
     parameters: List[str],
     labels: List[str],
     static_args_ini: str,
+    basis_dir: str,
     num_basis: int,
     val_coefficients: Optional[torch.Tensor]=None,
     val_gts: Optional[torch.Tensor]=None,
@@ -75,7 +76,7 @@ def tensorboard_writer(
     _, static_args = read_ini_config(static_args_ini)
     ifos = ('H1', 'L1')
     interferometers = {'H1': 'Hanford', 'L1': 'Livingston', 'V1': 'Virgo', 'K1': 'KAGRA'}
-    basis_dir = Path('/mnt/datahole/daniel/gravflows/datasets/basis/')
+    basis_dir = Path(basis_dir)
     basis = SVDBasis(basis_dir, static_args_ini, ifos, preload=False)
     basis.load(time_translations=False, verbose=False)
     basis.truncate(num_basis)
@@ -268,6 +269,8 @@ def train(
     save: int=100,
     num_workers: int=4,
     num_basis: int=100,
+    dataset: str='datasets',
+    coefficient_noise: bool=False,
     verbose: bool=False,
     # profile: bool=False,
 ):
@@ -281,12 +284,13 @@ def train(
     torch.cuda.set_device(rank)  # rank is gpu index
 
     # directories
-    data_dir = Path('/mnt/datahole/daniel/gravflows/datasets/train/')
-    val_dir = Path('/mnt/datahole/daniel/gravflows/datasets/validation/')
+    print(f"Loading data from {dataset}...")
+    data_dir = Path(f'/mnt/datahole/daniel/gravflows/{dataset}/train/')
+    val_dir = Path(f'/mnt/datahole/daniel/gravflows/{dataset}/validation/')
     
     noise_dir = Path('/mnt/datahole/daniel/gwosc/O1')
-    psd_dir = Path("/mnt/datahole/daniel/gravflows/datasets/train/PSD/")
-    basis_dir = Path('/mnt/datahole/daniel/gravflows/datasets/basis/')
+    psd_dir = Path(f"/mnt/datahole/daniel/gravflows/{dataset}/train/PSD/")
+    basis_dir = Path(f'/mnt/datahole/daniel/gravflows/{dataset}/basis/')
 
     log_dir = f"{datetime.now().strftime('%b%d_%H-%M-%S')}_{os.uname().nodename}"
 
@@ -322,6 +326,7 @@ def train(
         ref_ifo='H1',
         downcast=True,
         add_noise=True,
+        coefficient_noise=coefficient_noise,
     )
 
     sampler = DistributedSampler(
@@ -351,6 +356,7 @@ def train(
         basis_dir=basis_dir,
         static_args_ini=static_args_ini,
         parameters_ini=[waveform_params_ini, extrinsics_ini],
+        coefficient_noise=coefficient_noise,
     )
 
     val_sampler = DistributedSampler(
@@ -406,7 +412,7 @@ def train(
             ], dim=0).to(dtype=torch.complex64)
 
             # place one of each stacked tensor onto corresponding gpu rank
-            val_context = val_coefficients[rank] * torch.from_numpy(val_dataset.standardization[:, :num_basis])
+            val_context = val_coefficients[rank] * val_dataset.standardization[:, :num_basis]
             val_context = val_context.to(device=rank)
             val_context = torch.cat([val_context.real, val_context.imag], dim=0)
             val_context = val_context.reshape(val_context.shape[0]*val_context.shape[1])[None]
@@ -434,6 +440,7 @@ def train(
                 val_dataset.generator.parameters,
                 val_dataset.generator.latex,
                 static_args_ini,
+                basis_dir,
                 num_basis,
                 val_coefficients,
                 val_gts,
@@ -638,9 +645,9 @@ if __name__ == '__main__':
     parser.add_argument('--save', type=int, default=10)
     parser.add_argument('--num_workers', type=int, default=6, help="Number of workers for dataloader.")
     parser.add_argument('--num_basis', type=int, default=100, help="Number of SVD reduced basis elements to use")
+    parser.add_argument('--dataset', type=str, default='datasets', help="Dataset folder")
+    parser.add_argument('--coefficient_noise', default=False, action="store_true")
     parser.add_argument('--verbose', default=False, action="store_true")
-    # parser.add_argument('--profile', default=False, action="store_true")
-
 
     args = parser.parse_args()
 

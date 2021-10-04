@@ -28,6 +28,7 @@ class BasisCoefficientsDataset(Dataset):
         static_args_ini: str,
         parameters_ini: str,
         data_file: str='coefficients.npy',
+        coefficient_noise: bool=False,
     ):
         # load static argument file
         _, self.static_args = read_ini_config(static_args_ini)
@@ -38,8 +39,11 @@ class BasisCoefficientsDataset(Dataset):
 
         # load basis coefficient standardization scaler
         self.basis_dir = Path(basis_dir)
-        self.standardization = np.load(basis_dir / 'reduced_basis'/ 'standardization.npy')
+        self.standardization = torch.from_numpy(np.load(basis_dir / 'reduced_basis'/ 'standardization.npy'))
         
+        self.noise_std = get_noise_std_from_static_args(self.static_args)
+        self.coefficient_noise = coefficient_noise
+
         # ground truth parameters
         self.parameters = pd.read_csv(self.data_dir / 'parameters.csv', index_col=0).astype(np.float32)
         self.generator = ParameterGenerator(config_files=parameters_ini, seed=None)
@@ -59,15 +63,20 @@ class BasisCoefficientsDataset(Dataset):
         # parameter standardization
         parameters = (parameters - self.mean) / self.std
         
+        coefficients = torch.from_numpy(coefficients)  # (batch, ifo, length)
+        parameters = torch.from_numpy(parameters)  # (batch, 15)
+
+        if not self.coefficient_noise:
+            # add noise to reduced basis as per: https://github.com/stephengreen/lfi-gw/blob/f4a8aceb80965eb2ad8bf59b1499b93a3c7b9194/lfigw/waveform_generator.py#L1580
+            coefficients += torch.normal(0, self.noise_std, coefficients.shape, dtype=coefficients.dtype, device=coefficients.device)
+
         # coefficient standardization truncated to match input data 
         coefficients *= self.standardization[:, :coefficients.shape[2]]
 
         # flatten for 1-d residual network input
-        coefficients = np.concatenate([coefficients.real, coefficients.imag], axis=1)
+        coefficients = torch.cat([coefficients.real, coefficients.imag], dim=1)
         coefficients = coefficients.reshape(coefficients.shape[0], coefficients.shape[1]*coefficients.shape[2])
-        
-        coefficients = torch.from_numpy(coefficients)  # (batch, ifo, length)
-        parameters = torch.from_numpy(parameters)  # (batch, 15)
+
 
         return coefficients, parameters
 
@@ -94,6 +103,7 @@ class BasisEncoderDataset(Dataset):
         ref_ifo: Optional[str]=None,
         downcast: bool=False,
         add_noise: bool=False,
+        coefficient_noise: bool=False,
         # time_shift: bool=False,
     ):
         # load static argument file
@@ -119,6 +129,7 @@ class BasisEncoderDataset(Dataset):
         self.ifos = ifos
         
         self.noise_std = get_noise_std_from_static_args(self.static_args)
+        self.coefficient_noise = coefficient_noise
 
         # ground truth parameters
         self.parameters = pd.read_csv(self.data_dir / 'parameters.csv', index_col=0)
@@ -204,14 +215,20 @@ class BasisEncoderDataset(Dataset):
         parameters = torch.from_numpy(parameters)  # (batch, 15)
 
         # generate noise for whitened waveform above lowpass filter (i.e. >20Hz)
-        size = (projections.shape[0], projections.shape[1], projections.shape[2] - lowpass)
-        projections[:, :, lowpass:] += torch.normal(0, self.noise_std, size, dtype=projections.dtype, device=projections.device)
+        if self.add_noise and not self.coefficient_noise:
+            size = (projections.shape[0], projections.shape[1], projections.shape[2] - lowpass)
+            projections[:, :, lowpass:] += torch.normal(0, self.noise_std, size, dtype=projections.dtype, device=projections.device)
 
         # filter out values less than f_lower (e.g. 20Hz) - to do: check truncation vs. zeroing
         projections[:, : :lowpass] = 0.0  # may already be done in data generation.
 
         # project to reduced basis and 
-        coefficients = self.encoder(projections, scale=True)
+        coefficients = self.encoder(projections, scale=not self.coefficient_noise)
+
+        if self.add_noise and self.coefficient_noise:
+            # add noise to reduced basis as per: https://github.com/stephengreen/lfi-gw/blob/f4a8aceb80965eb2ad8bf59b1499b93a3c7b9194/lfigw/waveform_generator.py#L1580
+            coefficients += torch.normal(0, self.noise_std, coefficients.shape, dtype=coefficients.dtype, device=coefficients.device)
+            coefficients *= self.encoder.standardization
 
         # flatten for 1-d residual network input
         coefficients = torch.cat([coefficients.real, coefficients.imag], dim=1)
