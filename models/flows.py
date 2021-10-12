@@ -270,7 +270,8 @@ def sample_flow(
     Returns:
         Tensor -- samples
     """
-    with torch.no_grad():
+    if not flow.training: print("WARNING: Flows not in eval mode may generate incorrect samples.")
+    with torch.inference_mode():
         if context is not None:
             if not isinstance(context, torch.Tensor):
                 context = torch.from_numpy(context)

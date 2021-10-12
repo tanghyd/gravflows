@@ -18,8 +18,6 @@ from ..noise import get_noise_std_from_static_args, load_psd_from_file
 from ..waveforms import batch_project
 
 from .basis import BasisEncoder
-
-
 class BasisCoefficientsDataset(Dataset):
     def __init__(
         self,
@@ -68,15 +66,15 @@ class BasisCoefficientsDataset(Dataset):
 
         if not self.coefficient_noise:
             # add noise to reduced basis as per: https://github.com/stephengreen/lfi-gw/blob/f4a8aceb80965eb2ad8bf59b1499b93a3c7b9194/lfigw/waveform_generator.py#L1580
-            coefficients += torch.normal(0, self.noise_std, coefficients.shape, dtype=coefficients.dtype, device=coefficients.device)
-
+            # coefficients += torch.normal(0, self.noise_std, coefficients.shape, dtype=coefficients.dtype, device=coefficients.device)
+            coefficients += torch.normal(0, self.noise_std, coefficients.shape) + 1j*torch.normal(0, self.noise_std, coefficients.shape)
+            
         # coefficient standardization truncated to match input data 
         coefficients *= self.standardization[:, :coefficients.shape[2]]
 
         # flatten for 1-d residual network input
         coefficients = torch.cat([coefficients.real, coefficients.imag], dim=1)
         coefficients = coefficients.reshape(coefficients.shape[0], coefficients.shape[1]*coefficients.shape[2])
-
 
         return coefficients, parameters
 
@@ -86,7 +84,6 @@ class BasisCoefficientsDataset(Dataset):
     def __getitem__(self, idx):
         
         return np.array(self.data[idx]), self.parameters.iloc[idx].values
-
 
 class BasisEncoderDataset(Dataset):
     def __init__(
@@ -104,7 +101,8 @@ class BasisEncoderDataset(Dataset):
         downcast: bool=False,
         add_noise: bool=False,
         coefficient_noise: bool=False,
-        # time_shift: bool=False,
+        distance_scale: bool=True,
+        time_shift: bool=False,
     ):
         # load static argument file
         self.downcast = downcast
@@ -112,7 +110,8 @@ class BasisEncoderDataset(Dataset):
         self.real_dtype = np.float32 if self.downcast else np.float64
         
         self.add_noise = add_noise
-        # self.time_shift = time_shift
+        self.distance_scale = distance_scale
+        self.time_shift = time_shift
 
         _, self.static_args = read_ini_config(static_args_ini)
 
@@ -178,7 +177,7 @@ class BasisEncoderDataset(Dataset):
         self.mean = self.mean.astype(self.real_dtype)
         self.std = self.std.astype(self.real_dtype)
 
-        # reduced basis encoder - to do: put this in DataSet
+        # reduced basis encoder
         self.encoder.load(n=self.n, mmap_mode='r', verbose=True)
         for param in self.encoder.parameters():
             param.requires_grad = False
@@ -200,7 +199,8 @@ class BasisEncoderDataset(Dataset):
                 extrinsics,  # np.recarray
                 waveforms,
                 self.static_args,
-                time_shift=False,
+                distance_scale=self.distance_scale,
+                time_shift=self.time_shift,
             )
             
         # whiten
@@ -227,7 +227,8 @@ class BasisEncoderDataset(Dataset):
 
         if self.add_noise and self.coefficient_noise:
             # add noise to reduced basis as per: https://github.com/stephengreen/lfi-gw/blob/f4a8aceb80965eb2ad8bf59b1499b93a3c7b9194/lfigw/waveform_generator.py#L1580
-            coefficients += torch.normal(0, self.noise_std, coefficients.shape, dtype=coefficients.dtype, device=coefficients.device)
+            # coefficients += torch.normal(0, self.noise_std, coefficients.shape, dtype=coefficients.dtype, device=coefficients.device)
+            coefficients += torch.normal(0, self.noise_std, coefficients.shape) + 1j*torch.normal(0, self.noise_std, coefficients.shape)
             coefficients *= self.encoder.standardization
 
         # flatten for 1-d residual network input
@@ -256,12 +257,14 @@ class WaveformDataset(Dataset):
         ref_ifo: Optional[str]=None,
         downcast: bool=False,
         add_noise: bool=False,
+        distance_scale: bool=True,
         time_shift: bool=False,
     ):
         # load static argument file
         self.downcast = downcast
         self.add_noise = add_noise
         self.time_shift = time_shift
+        self.distance_scale = distance_scale
 
         _, self.static_args = read_ini_config(static_args_ini)
 
@@ -336,6 +339,7 @@ class WaveformDataset(Dataset):
                 extrinsics,  # np.recarray
                 waveforms,
                 self.static_args,
+                distance_scale=self.distance_scale,
                 time_shift=self.time_shift,
             )
             

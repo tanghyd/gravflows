@@ -5,7 +5,7 @@
 # # env DATASET_DIR=/fred/oz016/datasets/ bash generate_datasets.sh
 # # then we set it to be a default path
 
-dataset_dir=${DATASET_DIR:-"/mnt/datahole/daniel/gravflows/datasets_clean"}
+dataset_dir=${DATASET_DIR:-"/mnt/datahole/daniel/gravflows/lfigw"}
 # dataset_dir=${DATASET_DIR:-"gwpe/datasets"}
 echo "Saving datasets to ${dataset_dir}/"
 
@@ -16,10 +16,10 @@ SECONDS=0
 
 # reduced basis data set
 python -m gwpe.parameters \
-    -n 100000 \
+    -n 50000 \
     -d "${dataset_dir}/basis/" \
     -c gwpe/config_files/intrinsics.ini \
-    -c gwpe/config_files/extrinsics.ini \
+    -c gwpe/config_files/fiducial_extrinsics.ini \
     --overwrite \
     --metadata \
     --verbose
@@ -65,15 +65,11 @@ python -m gwpe.noise \
     --verbose \
     --validate
     
-# project waveforms for validation and test
+# copy PSD files to other dataset partitions for completeness
 for partition in "basis" "validation" "test"
 do
-
-    # copy PSD files to other dataset partitions for completeness
     for ifo in "H1" "L1"
     do
-        # psd_out_dir="${dataset_dir}/${partition}"
-        # mkdir -p "${psd_out_dir}"
         cp -r "${dataset_dir}/train/PSD" "${dataset_dir}/${partition}"
     done
 
@@ -87,8 +83,7 @@ python -m gwpe.waveforms \
     -d "${dataset_dir}/basis/" \
     -s gwpe/config_files/static_args.ini \
     --psd_dir "${dataset_dir}/basis/PSD/" \
-    --ifos "H1" "L1" \
-    --projections_only \
+    --ref_ifo "H1" \
     --lowpass \
     --whiten \
     --overwrite \
@@ -96,7 +91,9 @@ python -m gwpe.waveforms \
     --validate \
     --metadata \
     --chunk_size 5000 \
-    --workers 12
+    --workers 12 \
+    # --ifos "H1" "L1" \
+    # --projections_only \
     
 
 # Fit reduced basis with randomized SVD
@@ -104,10 +101,12 @@ python -m gwpe.basis \
     -n 600 \
     -d "${dataset_dir}/basis/" \
     -s gwpe/config_files/static_args.ini \
+    --file 'projections.npy' \
     --overwrite \
     --verbose \
-    --validate \
-    --pytorch 
+    --pytorch \
+    --concatenate
+    # --validate \
 
 # # run waveform generation script for training data
 python -m gwpe.waveforms \
@@ -129,16 +128,20 @@ python -m gwpe.waveforms \
     # --ifos "H1" "L1" \
 
 # pre-generate coeffficients for training
-# python -m gwpe.basis \
-#     -n 100 \
-#     -d "${dataset_dir}/basis/" \
-#     -s gwpe/config_files/static_args.ini \
-#     --projections_dir "${dataset_dir}/train/" \
-#     --coefficients \
-#     --overwrite \
-#     --verbose \
-#     --validate \
-#     --chunk_size 5000
+python -m gwpe.basis \
+    -n 100 \
+    -s gwpe/config_files/static_args.ini \
+    --basis_dir "${dataset_dir}/basis/" \
+    --data_dir "${dataset_dir}/train/" \
+    --file 'waveforms.npy' \
+    --concatenate \
+    --coefficients \
+    --overwrite \
+    --verbose \
+    --chunk_size 5000 \
+    --pytorch \
+    --concatenate
+    # --validate \
 
 # Evaluation datasets
 
@@ -163,14 +166,16 @@ python -m gwpe.waveforms \
     
 python -m gwpe.basis \
     -n 100 \
-    -d "${dataset_dir}/basis/" \
     -s gwpe/config_files/static_args.ini \
-    --projections_dir "${dataset_dir}/validation/" \
+    --basis_dir "${dataset_dir}/basis/" \
+    --data_dir "${dataset_dir}/validation/" \
+    --file 'waveforms.npy' \
+    --concatenate \
     --coefficients \
     --overwrite \
     --verbose \
-    --validate \
     --chunk_size 5000
+    # --validate \
 
 # validation and test waveforms are noisy
 python -m gwpe.waveforms \
@@ -193,14 +198,15 @@ python -m gwpe.waveforms \
 
 python -m gwpe.basis \
     -n 100 \
-    -d "${dataset_dir}/basis/" \
     -s gwpe/config_files/static_args.ini \
-    --projections_dir "${dataset_dir}/test/" \
+    --basis_dir "${dataset_dir}/basis/" \
+    --data_dir "${dataset_dir}/test/" \
+    --file 'waveforms.npy' \
     --coefficients \
     --overwrite \
     --verbose \
-    --validate \
     --chunk_size 5000
+    # --validate \
 
 # print out size of datasets
 for partition in "train" "basis" "validation" "test"

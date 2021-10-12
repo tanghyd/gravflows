@@ -210,7 +210,7 @@ def tensorboard_writer(
                         fig.legend(
                             handles=[
                                 mpatches.Patch(color='tab:blue', label='Neural Spline Flow'),
-                                mpatches.Patch(color='tab:orange', label='Bilby')],
+                                mpatches.Patch(color='tab:orange', label='Bilby (dynesty)')],
                             loc='upper right',
                             fontsize=16, 
                         )
@@ -466,6 +466,8 @@ def train(
 
             # let all processes sync up before starting with a new epoch of training
             distributed.barrier()
+            flow.train()
+
             iterator = iter(dataloader)
             coefficients, parameters = next(iterator)
             
@@ -516,8 +518,11 @@ def train(
             train_loss *= 0.0  # reset loss for next epoch
             
             if (interval != 0) and (epoch % interval == 0):
+                
+                # evaluate model on validation dataset
+                flow.eval()
+
                 with torch.no_grad():
-                    # evaluate model on validation dataset
                     iterator = iter(enumerate(val_loader))
                     step, (coefficients, parameters) = next(iterator)
                     coefficients = coefficients.to(rank, non_blocking=True)

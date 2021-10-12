@@ -205,10 +205,10 @@ class BasisEncoder(nn.Module):
     """
     def __init__(
         self,
-        static_args_ini: str,
         data_dir: Union[str, os.PathLike],
-        projections_file: str='projections.npy',
-        ifos: List[str]=['H1', 'L1'],
+        static_args_ini: str,
+        ifos: Optional[List[str]]=['H1', 'L1'],
+        file: Optional[str]='projections.npy',
         mmap_mode: Optional[str]=None,
         time_translations: bool=False, 
         preload: bool=True,
@@ -216,7 +216,7 @@ class BasisEncoder(nn.Module):
     ):
         super().__init__()
         
-        self.basis = SVDBasis(static_args_ini, data_dir, ifos, projections_file, preload=False)
+        self.basis = SVDBasis(data_dir, static_args_ini, ifos, file, preload=False, verbose=verbose)
 
         if preload:
             self.load(mmap_mode=mmap_mode, time_translations=time_translations, verbose=verbose)
@@ -230,11 +230,14 @@ class BasisEncoder(nn.Module):
         mmap_mode: Optional[str]=None,
         time_translations: bool=False,
         verbose: bool=False,
+        encoder_only: bool=False,
     ):
-        self.basis.load(mmap_mode=mmap_mode, time_translations=time_translations, verbose=verbose)
+        if not encoder_only:
+            self.basis.load(mmap_mode=mmap_mode, time_translations=time_translations, verbose=verbose)
+    
         if n is not None: self.basis.truncate(n)
         self.V = nn.Parameter(torch.from_numpy(self.basis.V))
-        scaler = torch.from_numpy(self.basis.standardization.astype(self.basis.V.dtype))
+        scaler = torch.from_numpy(self.basis.standardization)
         self.register_buffer('standardization', scaler)
 
     def time_translate(
@@ -314,11 +317,13 @@ class BasisEncoder(nn.Module):
         return translated#.to(device)
         
     def forward(self, x, scale: bool=True):
-        coefficients = torch.einsum('bij, ijk -> bik', x, self.V)
+        dim = 'n' if self.V.shape[0] == 1 else 'i'  # broadcast changes i -- > n 
+        coefficients = torch.einsum(f'bij, {dim}jk -> bik', x, self.V)
         if scale: coefficients *= self.standardization
         return coefficients
     
     def inverse(self, x, scale: bool=True):
         if scale:
             x = x / self.standardization
-        return torch.einsum('bik, ikj -> bij', x, torch.transpose(self.V, 1, 2).conj())
+        dim = 'n' if self.V.shape[0] == 1 else 'i'  # broadcast changes i -- > n 
+        return torch.einsum(f'bik, {dim}kj -> bij', x, torch.transpose(self.V, 1, 2).conj())

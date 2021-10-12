@@ -25,7 +25,7 @@ def generate_gw150914_context(
 
     _, static_args = read_ini_config(static_args_ini)
 
-    basis = SVDBasis(basis_dir, static_args_ini, ifos, preload=False)
+    basis = SVDBasis(basis_dir, static_args_ini, ifos, file=None, preload=False)
     basis.load(time_translations=False, verbose=verbose)
     if n is not None: basis.truncate(n)
 
@@ -58,7 +58,8 @@ def generate_gw150914_context(
         strains[ifo] = strains[ifo][:static_args['fd_length']]  # truncate to 1024Hz
         
         # project gw150914 strain to reduced basis
-        coefficients.append(strains[ifo] @ basis.V[i])
+        V = basis.V[0] if basis.V.shape[0] == 1 else basis.V[i]
+        coefficients.append(strains[ifo] @ V)
         
     coefficients = np.stack(coefficients)
 

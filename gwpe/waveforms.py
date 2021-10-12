@@ -118,7 +118,7 @@ def generate_intrinsic_waveform(
             )
             
     # reference distance - we are generating intrinsic parameters and we scale distance later
-    distance = static_args.get('distance', 1)  # func default is 1 anyway
+    distance = static_args.get('distance', 1000)  # function default is 1, we use 1000 as ref dist
     
     # determine parameters conditional on spin and inclination of CBC
     if spins:
@@ -293,7 +293,8 @@ def batch_project(
     waveforms: np.ndarray,
     static_args: Dict[str, Union[str,float]],
     sample_frequencies: Optional[np.ndarray]=None,
-    time_shift: bool=False
+    distance_scale: bool=False,
+    time_shift: bool=False,
 ):
     # get frequency bins (we handle numpy arrays rather than PyCBC arrays with .sample_frequencies attributes)
     if sample_frequencies is None:
@@ -303,10 +304,14 @@ def batch_project(
         )
     
     # check waveform matrix inputs
-    assert waveforms.shape[-1] == sample_frequencies.shape[0], "delta_f and fd_length do not match."
     assert waveforms.shape[1] == 2, "2nd dim in waveforms must be plus and cross polarizations."
     assert waveforms.shape[0] == len(extrinsics), "waveform batch and extrinsics length must match."
-    
+
+    if distance_scale:
+        # scale waveform amplitude according to sample d_L parameter
+        scale = static_args.get('distance', 1000)  / extrinsics['distance']  # default d_L = 1
+        waveforms = np.array(waveforms) * scale[:, None, None]
+
     # calculate antenna pattern given arrays of extrinsic parameters
     fp, fc = detector.antenna_pattern(
         extrinsics['ra'], extrinsics['dec'], extrinsics['psi'],
@@ -316,12 +321,14 @@ def batch_project(
     # batch project
     projections = fp[:, None]*waveforms[:, 0, :] + fc[:, None]*waveforms[:, 1, :]
 
-    # scale waveform amplitude according to sample d_L parameter
-    scale = static_args.get('distance', 1.)  / extrinsics['distance']  # default d_L = 1
-    projections *= scale[:, None]
- 
+    # if distance_scale:
+    #     # scale waveform amplitude according to sample d_L parameter
+    #     scale = static_args.get('distance', 1000)  / extrinsics['distance']  # default d_L = 1
+    #     projections *= scale[:, None]
     
     if time_shift:    
+        assert waveforms.shape[-1] == sample_frequencies.shape[0], "delta_f and fd_length do not match."
+        
         # calculate geocentric time for the given detector
         dt = detector.time_delay_from_earth_center(extrinsics['ra'], extrinsics['dec'], static_args.get('ref_time', 0.))
     
@@ -434,6 +441,7 @@ def generate_waveform_dataset(
     downcast: bool=False,
     verbose: bool=False,
     validate: bool=False,
+    distance_scale: bool=False,
     time_shift: bool=False,
     workers: int=1,
     chunk_size: int=2500,
@@ -614,6 +622,7 @@ def generate_waveform_dataset(
                             waveforms,
                             static_args,
                             sample_frequencies,
+                            distance_scale=distance_scale,
                             time_shift=time_shift,
                         )
                         
@@ -695,10 +704,10 @@ if __name__ == '__main__':
 
     # signal processing
     parser.add_argument('--add_noise', default=False, action="store_true", help="Whether to add frequency noise - if PSDs are provided we add coloured noise, else Gaussian.")
-    # parser.add_argument('--noise_std', default=1.0, type=float, help="Noise standard deviation for generated white noise.")
     parser.add_argument('--gaussian', default=False, action="store_true", help="Whether to generate white gaussian nois when add_noise is True. If False, coloured noise is generated from a PSD.")
     parser.add_argument('--whiten', default=False, action="store_true", help="Whether to whiten the data with the provided PSD before fitting a reduced basis.")
     parser.add_argument('--lowpass', default=False, action="store_true", help="Whether to truncate the frequency domain data below 'f_lower' specified in the static args.")
+    parser.add_argument('--distance_scale', default=False, action="store_true", help="Whether to scale the waveform by applying the sampled distance.")
     parser.add_argument('--time_shift', default=False, action="store_true", help="Whether to shift the waveform by applying the sampled time shift.")
 
     # logging

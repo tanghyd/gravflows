@@ -29,6 +29,8 @@ import torch.multiprocessing as mp
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
 
+from torch.distributed.optim import ZeroRedundancyOptimizer
+
 import bilby
 from pycbc.catalog import Merger
 from pycbc.types import FrequencySeries
@@ -38,6 +40,7 @@ from models import flows
 
 from gwpe.basis import SVDBasis
 from gwpe.pytorch.datasets import BasisCoefficientsDataset, BasisEncoderDataset
+from gwpe.pytorch.lfigw_datasets import LFIGWDataset
 from gwpe.utils import read_ini_config
 from gwpe.utils.events import generate_gw150914_context
 
@@ -49,6 +52,10 @@ def setup_nccl(rank, world_size):
 
 def cleanup_nccl():
     distributed.destroy_process_group()
+
+def print_peak_memory(prefix, device):
+    if device == 0:
+        print(f"{prefix}: {torch.cuda.max_memory_allocated(device) // 1e6}MB ")
 
 def tensorboard_writer(
     queue: mp.Queue,
@@ -77,7 +84,7 @@ def tensorboard_writer(
     ifos = ('H1', 'L1')
     interferometers = {'H1': 'Hanford', 'L1': 'Livingston', 'V1': 'Virgo', 'K1': 'KAGRA'}
     basis_dir = Path(basis_dir)
-    basis = SVDBasis(basis_dir, static_args_ini, ifos, preload=False)
+    basis = SVDBasis(basis_dir, static_args_ini, ifos, file=None, preload=False)
     basis.load(time_translations=False, verbose=False)
     basis.truncate(num_basis)
 
@@ -86,7 +93,8 @@ def tensorboard_writer(
         fig, ax = plt.subplots(nrows=1, ncols=1, figsize=(16, 4))
         
         for i, ifo in enumerate(ifos):
-            reconstruction = val_coefficients[j, i] @ basis.Vh[i]
+            Vh = basis.Vh[0] if basis.Vh.shape[0] == 1 else basis.Vh[i]
+            reconstruction = val_coefficients[j, i] @ Vh
             reconstruction = FrequencySeries(reconstruction, delta_f=static_args['delta_f'])
             strain = reconstruction.to_timeseries(delta_t=static_args['delta_t'])
             ax.plot(strain.sample_times, strain, label=interferometers[ifo], alpha=0.6)
@@ -140,7 +148,7 @@ def tensorboard_writer(
         [0, 2*np.pi],  # phi_jl
         [0, np.pi],  # theta_jn
         [0, np.pi],  # psi
-        [0, np.pi],  # ra
+        [0, 2*np.pi],  # ra
         [-np.pi/2, np.pi/2],  # dec
         # [0.005,0.055],  # tc
         [100,800],  # distance
@@ -211,7 +219,7 @@ def tensorboard_writer(
                         fig.legend(
                             handles=[
                                 mpatches.Patch(color='tab:blue', label='Neural Spline Flow'),
-                                mpatches.Patch(color='tab:orange', label='Bilby')],
+                                mpatches.Patch(color='tab:orange', label='Bilby (dynesty)')],
                             loc='upper right',
                             fontsize=16, 
                         )
@@ -270,9 +278,11 @@ def train(
     num_workers: int=4,
     num_basis: int=100,
     dataset: str='datasets',
+    load_dir: Optional[str]=None,
+    load_epoch: Optional[int]=None,
     coefficient_noise: bool=False,
     verbose: bool=False,
-    # profile: bool=False,
+    use_zero: bool=False,
 ):
     assert 0 < batch_size, "batch_size must be a positive integer."
     assert 0 < epochs, "epochs must be a positive integer."
@@ -284,7 +294,7 @@ def train(
     torch.cuda.set_device(rank)  # rank is gpu index
 
     # directories
-    print(f"Loading data from {dataset}...")
+    if rank == 0: print(f"Loading data from {dataset}...")
     data_dir = Path(f'/mnt/datahole/daniel/gravflows/{dataset}/train/')
     val_dir = Path(f'/mnt/datahole/daniel/gravflows/{dataset}/validation/')
     
@@ -314,11 +324,27 @@ def train(
     #     parameters_ini=waveform_params_ini,
     # )
 
-    dataset = BasisEncoderDataset(
-        n=num_basis,
+    # dataset = BasisEncoderDataset(
+    #     n=num_basis,
+    #     data_dir=data_dir,
+    #     basis_dir=basis_dir,
+    #     static_args_ini=static_args_ini,
+    #     intrinsics_ini=waveform_params_ini,
+    #     extrinsics_ini=extrinsics_ini,
+    #     psd_dir=psd_dir,
+    #     ifos=['H1','L1'],
+    #     ref_ifo='H1',
+    #     downcast=True,
+    #     add_noise=True,
+    #     coefficient_noise=coefficient_noise,
+    # )
+
+    dataset = LFIGWDataset(
+        n=100,
         data_dir=data_dir,
         basis_dir=basis_dir,
         static_args_ini=static_args_ini,
+        data_file='coefficients.npy',
         intrinsics_ini=waveform_params_ini,
         extrinsics_ini=extrinsics_ini,
         psd_dir=psd_dir,
@@ -326,7 +352,8 @@ def train(
         ref_ifo='H1',
         downcast=True,
         add_noise=True,
-        coefficient_noise=coefficient_noise,
+        distance_scale=True,
+        time_shift=False,
     )
 
     sampler = DistributedSampler(
@@ -351,13 +378,31 @@ def train(
     )
 
     # validation data
-    val_dataset = BasisCoefficientsDataset(
-        data_dir=val_dir,
+    val_dataset = LFIGWDataset(
+        n=100,
+        data_dir=data_dir,
         basis_dir=basis_dir,
         static_args_ini=static_args_ini,
-        parameters_ini=[waveform_params_ini, extrinsics_ini],
+        data_file='coefficients.npy',
+        intrinsics_ini=waveform_params_ini,
+        extrinsics_ini=extrinsics_ini,
+        psd_dir=psd_dir,
+        ifos=['H1','L1'],
+        ref_ifo='H1',
+        downcast=True,
+        add_noise=True,
         coefficient_noise=coefficient_noise,
+        distance_scale=True,
+        time_shift=False,
     )
+
+    # val_dataset = BasisCoefficientsDataset(
+    #     data_dir=val_dir,
+    #     basis_dir=basis_dir,
+    #     static_args_ini=static_args_ini,
+    #     parameters_ini=[waveform_params_ini, extrinsics_ini],
+    #     coefficient_noise=coefficient_noise,
+    # )
 
     val_sampler = DistributedSampler(
         val_dataset,
@@ -462,10 +507,36 @@ def train(
         }
     )
 
+    flow = flow.to(rank)
+    print_peak_memory("Max memory allocated after creating local model", rank)
+
     # sync_bn_flow = nn.SyncBatchNorm.convert_sync_batchnorm(flow)
-    flow = DDP(flow.to(rank), device_ids=[rank], output_device=rank)
-    optimizer = torch.optim.Adam(flow.parameters(), lr=lr)
+    flow = DDP(flow, device_ids=[rank], output_device=rank)
+
+    print_peak_memory("Max memory allocated after creating DDP", rank)
+
+    if use_zero:
+        #https://pytorch.org/tutorials/recipes/zero_redundancy_optimizer.html
+        from torch.distributed.optim import ZeroRedundancyOptimizer
+        optimizer = ZeroRedundancyOptimizer(
+            flow.parameters(),
+            optimizer_class=torch.optim.Adam,
+            lr=lr,
+            parameters_as_bucket_view=True,
+        )
+        # optimizer = torch.optim.Adam(flow.parameters(), lr=lr)
+    else:
+        optimizer = torch.optim.Adam(flow.parameters(), lr=lr)
+
+
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+
+    if load_dir is not None and load_epoch is not None:
+        print(f'Loading model from {load_dir} at epoch {load_epoch}.')
+        flow.module.load_state_dict(torch.load(f'gwpe/model_weights/{load_dir}/flow_{load_epoch}.pt', map_location=rank))
+        optimizer.load_state_dict(torch.load(f'gwpe/model_weights/{load_dir}/optimizer_{load_epoch}.pt', map_location=rank))
+        if Path(f'gwpe/model_weights/{load_dir}/scheduler_{load_epoch}.pt').is_file():
+            scheduler.load_state_dict(torch.load(f'gwpe/model_weights/{load_dir}/scheduler_{load_epoch}.pt', map_location=rank))
 
     # run training loop
     flow.train()
@@ -473,7 +544,7 @@ def train(
     val_loss = torch.zeros((1,), device=rank, requires_grad=False)
 
     disable_pbar = False if verbose and (rank == 0) else True  # tqdm progress bar
-    with tqdm(total=len(dataloader)*epochs, disable=disable_pbar) as progress:
+    with tqdm(total=len(dataloader)*epochs, disable=disable_pbar, desc=f'[{log_dir}] Training', postfix={'epoch': 0}) as progress:
         # with torch.profiler.profile(
         #     activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
         #     schedule=torch.profiler.schedule(wait=wait, warmup=warmup, active=active, repeat=repeat),
@@ -488,7 +559,9 @@ def train(
                 progress.set_description(f'[{log_dir}] Training', refresh=True)
 
             # let all processes sync up before starting with a new epoch of training
+            flow.train()
             distributed.barrier()
+
             iterator = iter(dataloader)
             coefficients, parameters = next(iterator)
             
@@ -524,7 +597,11 @@ def train(
                     complete = True
                     
                 loss.backward()
+
+                print_peak_memory("Max memory allocated before optimizer step()", rank)
                 optimizer.step()
+                print_peak_memory("Max memory allocated after optimizer step()", rank)
+                
                 # if profile: profiler.step()
 
                 # total loss summed over each sample in batch
@@ -539,8 +616,10 @@ def train(
             train_loss *= 0.0  # reset loss for next epoch
             
             if (interval != 0) and (epoch % interval == 0):
+                # evaluate model on validation dataset
+                flow.eval()
                 with torch.no_grad():
-                    # evaluate model on validation dataset
+
                     iterator = iter(enumerate(val_loader))
                     step, (coefficients, parameters) = next(iterator)
                     coefficients = coefficients.to(rank, non_blocking=True)
@@ -618,7 +697,15 @@ def train(
                 if (save != 0) and (epoch % save == 0):
                     # save checkpoint and write computationally expensive data to tb
                     torch.save(flow.module.state_dict(), experiment_dir / f'flow_{epoch}.pt')
+                    
+                    # if use_zero:
+                    #     # needs to be called on all ranks
+                    #     optimizer.consolidate_state_dict(to=0)
+
                     torch.save(optimizer.state_dict(), experiment_dir / f'optimizer_{epoch}.pt')
+
+                    if scheduler is not None:
+                        torch.save(scheduler.state_dict(), experiment_dir / f'scheduler_{epoch}.pt')
 
     # destroy processes from distributed training
     if rank == 0:
@@ -646,8 +733,12 @@ if __name__ == '__main__':
     parser.add_argument('--num_workers', type=int, default=6, help="Number of workers for dataloader.")
     parser.add_argument('--num_basis', type=int, default=100, help="Number of SVD reduced basis elements to use")
     parser.add_argument('--dataset', type=str, default='datasets', help="Dataset folder")
+    parser.add_argument('--load_dir', type=str, help="The model weights directory that stores both the flow model parameters and optimizer.")
+    parser.add_argument('--load_epoch', type=str, help="The epoch to load state dicts from the specified load_dir.")
     parser.add_argument('--coefficient_noise', default=False, action="store_true")
     parser.add_argument('--verbose', default=False, action="store_true")
+    parser.add_argument('--use_zero', default=False, action="store_true", help="Whether to use ZeroRedudancyOptimizer.")
+
 
     args = parser.parse_args()
 
@@ -655,6 +746,17 @@ if __name__ == '__main__':
     assert args.num_gpus > 0 and args.num_gpus <= torch.cuda.device_count(), f"{args.num_gpus} not a valid number of GPU devices."
 
     # data distributed parallel
+    print("=== Using ZeroRedundancyOptimizer ===")
+    args.use_zero = True
+    mp.spawn(
+        train,
+        args=tuple(args.__dict__.values()),  # assumes parser loaded in correct order
+        nprocs=args.num_gpus,
+        join=True
+    )
+
+    print("=== Not Using ZeroRedundancyOptimizer ===")
+    args.use_zero = False
     mp.spawn(
         train,
         args=tuple(args.__dict__.values()),  # assumes parser loaded in correct order
