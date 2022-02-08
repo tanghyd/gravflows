@@ -31,10 +31,8 @@ class MassConstraint:
         try:
             out = self._constraint(params)
         except NameError:
-            # one or more needed parameters don't exist; try applying the
-            # transforms
-            params = apply_transforms(params, self.transforms) \
-                     if self.transforms else params
+            # one or more needed parameters don't exist; try applying the transforms
+            params = apply_transforms(params, self.transforms) if self.transforms else params
             out = self._constraint(params)
         if isinstance(out, record.FieldArray):
             out = out.item() if params.size == 1 else out

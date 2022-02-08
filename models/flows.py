@@ -2,12 +2,14 @@
 # https://github.com/stephengreen/lfi-gw/blob/master/lfigw/nde_flows.py
  
 from typing import Union, Optional
+
 import numpy as np
+
 import torch
 from torch.nn import functional as F
 
 from nflows import distributions, flows, transforms, utils
-from nflows.nn import nets
+import nflows.nn.nets as nets
 
 def create_linear_transform(param_dim):
     """Create the composite linear transform PLU.
@@ -23,7 +25,6 @@ def create_linear_transform(param_dim):
         transforms.RandomPermutation(features=param_dim),
         transforms.LULinear(param_dim, identity_init=True)
     ])
-
 
 def create_base_transform(
     i,
@@ -142,6 +143,7 @@ def create_transform(
     param_dim: int,
     context_dim: int,
     base_transform_kwargs: dict,
+    reorder: bool=False,
 ):
     """Build a sequence of NSF transforms, which maps parameters x into the
     base distribution u (noise). Transforms are conditioned on strain data y.
@@ -168,52 +170,56 @@ def create_transform(
 
 
     """
-    transform = transforms.CompositeTransform([
-        transforms.CompositeTransform([
-            create_linear_transform(param_dim),
-            create_base_transform(
-                i,
-                param_dim,
-                context_dim=context_dim,
-                **base_transform_kwargs
-            )
-        ]) for i in range(num_flow_steps)
-    ] + [
-        create_linear_transform(param_dim)
-    ])
+    if not reorder:
+        return transforms.CompositeTransform([
+            transforms.CompositeTransform([
+                create_linear_transform(param_dim),
+                create_base_transform(
+                    i,
+                    param_dim,
+                    context_dim=context_dim,
+                    **base_transform_kwargs
+                )
+            ]) for i in range(num_flow_steps)
+        ] + [
+            create_linear_transform(param_dim)
+        ])
 
-    # This architecture has been re-compartmentalized to have an initial linear
-    # transform, followed by pairs of (NSF, linear) transforms. The architecture
-    # should be exactly the same as in lfigw/nde_flows.py but intermediate layers
-    # have been grouped differently for ease of visualising intermediate predictions.
+    else:
+        # This architecture has been re-compartmentalized to have an initial linear
+        # transform, followed by pairs of (NSF, linear) transforms. The architecture
+        # should be exactly the same as in lfigw/nde_flows.py but intermediate layers
+        # have been grouped differently for ease of visualising intermediate predictions.
 
-    # transform = transforms.CompositeTransform([
-    #     transforms.CompositeTransform([
-    #         create_linear_transform(param_dim),
-    #         create_base_transform(
-    #             i,
-    #             param_dim,
-    #             context_dim=context_dim,
-    #             **base_transform_kwargs
-    #         )
-    #     ]) for i in range(num_flow_steps-1)
-    # ] + [transforms.CompositeTransform([
-    #         create_linear_transform(param_dim),
-    #         create_base_transform(
-    #             num_flow_steps-1,
-    #             param_dim,
-    #             context_dim=context_dim,
-    #             **base_transform_kwargs
-    #         ),
-    #         create_linear_transform(param_dim)
-    #     ])]
-    # )
+        return transforms.CompositeTransform([
+            transforms.CompositeTransform([
+                create_linear_transform(param_dim),
+                create_base_transform(
+                    i,
+                    param_dim,
+                    context_dim=context_dim,
+                    **base_transform_kwargs
+                )
+            ]) for i in range(num_flow_steps-1)
+        ] + [transforms.CompositeTransform([
+                create_linear_transform(param_dim),
+                create_base_transform(
+                    num_flow_steps-1,
+                    param_dim,
+                    context_dim=context_dim,
+                    **base_transform_kwargs
+                ),
+                create_linear_transform(param_dim)
+            ])]
+        )
 
-    return transform
-
-
-def create_NDE_model(input_dim, context_dim, num_flow_steps,
-                     base_transform_kwargs):
+def create_NDE_model(
+    input_dim,
+    context_dim,
+    num_flow_steps,
+    base_transform_kwargs,
+    reorder: bool=False,
+):
     """Build NSF (neural spline flow) model. This uses the nsf module
     available at https://github.com/bayesiains/nsf.
 
@@ -233,10 +239,12 @@ def create_NDE_model(input_dim, context_dim, num_flow_steps,
         Flow -- the model
     """
     distribution = distributions.StandardNormal((input_dim,))
-    transform = create_transform(num_flow_steps, input_dim, context_dim, base_transform_kwargs)
+    transform = create_transform(num_flow_steps, input_dim, context_dim, base_transform_kwargs, reorder)
     flow = flows.Flow(transform, distribution)
 
-    # Store hyperparameters - useful for loading from file.
+    # Store hyperparameters. This is for reconstructing model when loading from
+    # saved file.
+
     flow.model_hyperparams = {
         'input_dim': input_dim,
         'num_flow_steps': num_flow_steps,

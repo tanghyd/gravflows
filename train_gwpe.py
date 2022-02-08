@@ -390,7 +390,7 @@ def train(
             ], dim=0).to(dtype=torch.complex64)
 
             # place one of each stacked tensor onto corresponding gpu rank
-            val_context = val_coefficients[rank] * torch.from_numpy(val_dataset.standardization[:, :num_basis])
+            val_context = val_coefficients[rank] * val_dataset.standardization[:, :num_basis]
             val_context = val_context.to(device=rank)
             val_context = torch.cat([val_context.real, val_context.imag], dim=0)
             val_context = val_context.reshape(val_context.shape[0]*val_context.shape[1])[None]

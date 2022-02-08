@@ -168,7 +168,7 @@ def compute_parameter_statistics(bounds: Dict[str, pycbc.boundaries.Bounds]):
         elif param in (
             'phase', 'time', 'distance',
             'chi_1', 'chi_2', 'a_1', 'a_2',
-            'phi_12', 'phi_jk', 'ra', #'psi',
+            'phi_12', 'phi_jk', 'ra', 'psi',
         ):
             # Uniform prior
             mean = (left + right)/2
@@ -184,7 +184,7 @@ def compute_parameter_statistics(bounds: Dict[str, pycbc.boundaries.Bounds]):
 #                               + 4*left*(right**3) + right**4))
 #                           / (80.*((left**2 + left*right + right**2)**2)))
 
-        elif param in ('tilt_1', 'tilt_2', 'theta_jn', 'psi'):
+        elif param in ('tilt_1', 'tilt_2', 'theta_jn'):
             # Uniform in cosine prior
             # Assume range is [0, pi]
             mean = np.pi / 2.0

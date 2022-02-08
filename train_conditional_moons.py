@@ -82,7 +82,7 @@ def train(
         xgrid, ygrid = torch.meshgrid(xline, yline)  # (x,y) co-ordinate grid
         xyinput = torch.cat([xgrid.reshape(-1, 1), ygrid.reshape(-1, 1)], dim=1).to(device)
         zeroes = torch.zeros(10000, 1, device=device)
-        # ones = torch.ones(10000, 1, device=device)
+        ones = torch.ones(10000, 1, device=device)
 
     # train
     with tqdm(total=epochs*len(dataloader), desc='Training on Two Moons Dataset') as progress:
@@ -92,7 +92,6 @@ def train(
                 optimizer.zero_grad()               
                 
                 x = x.to(device)
-                y = torch.zeros_like(y)
                 y = y.to(device)
                 
                 # estimate negative log likelihood conditional on class
@@ -107,13 +106,18 @@ def train(
                         # compute likelihood of observing 10,000 (x,y) co-ordinate pairs conditioned on label
                         if cascade:
                             # compute intermediate log probabilities and stack
-                            zgrid = cascade_log_probs(flow, xyinput, zeroes).exp()
+                            zgrid0 = cascade_log_probs(flow, xyinput, zeroes).exp()
+                            zgrid1 = cascade_log_probs(flow, xyinput, ones).exp()
                         else:
-                            zgrid = flow.log_prob(xyinput, zeroes).exp()
+                            zgrid0 = flow.log_prob(xyinput, zeroes).exp()
+                            zgrid1 = flow.log_prob(xyinput, ones).exp()
                     
                         # reshape all samples to 2D images (100x100); rotate 90 degrees counter-clockerwise
                         zgrids = torchvision.transforms.functional.rotate(
-                            zgrid.reshape(nrow, 100, 100),
+                            torch.cat([
+                                zgrid.reshape(nrow, 100, 100)
+                                for zgrid in (zgrid0, zgrid1)
+                            ]),
                             angle=90.,
                         )
                         
@@ -195,8 +199,7 @@ def train_distributed(
         input_dim=2,
         context_dim=1,
         num_flow_steps=5,
-        base_transform_kwargs={'base_transform_type': 'rq-coupling'},
-        reorder=True,
+        base_transform_kwargs={'base_transform_type': 'rq-coupling'}
     )
 
     # Initialise data distributed parallel wrapper for pytorch model
@@ -218,7 +221,7 @@ def train_distributed(
             xgrid, ygrid = torch.meshgrid(xline, yline)  # (x,y) co-ordinate grid
             xyinput = torch.cat([xgrid.reshape(-1, 1), ygrid.reshape(-1, 1)], dim=1).to(rank)
             zeroes = torch.zeros(10000, 1, device=rank)
-            # ones = torch.ones(10000, 1, device=rank)
+            ones = torch.ones(10000, 1, device=rank)
 
     # train
     disable_pbar = False if (rank == 0) else True  # tqdm progress bar
@@ -252,16 +255,22 @@ def train_distributed(
                             # compute likelihood of observing data for 10,000 (x,y) co-ordinate pairs conditioned on class
                             if cascade:
                                 # compute intermediate log probabilities and stack for video
-                                zgrid = cascade_log_probs(flow.module, xyinput, zeroes).exp()
+                                zgrid0 = cascade_log_probs(flow.module, xyinput, zeroes).exp()  # class = 0
+                                zgrid1 = cascade_log_probs(flow.module, xyinput, ones).exp()  # class = 1
                             else:
-                                zgrid = flow.module.log_prob(xyinput, zeroes).exp()
+                                zgrid0 = flow.module.log_prob(xyinput, zeroes).exp()
+                                zgrid1 = flow.module.log_prob(xyinput, ones).exp()
                         
-                            zgrid = zgrid.detach().cpu()
+                            zgrid0 = zgrid0.detach().cpu()
+                            zgrid1 = zgrid1.detach().cpu()
 
                             # reshape all samples to 2D images (100x100)
                             # rotate 90 degrees counter-clockerwise to fix indexing on image
                             zgrids = torchvision.transforms.functional.rotate(
-                                zgrid.reshape(nrow, 100, 100),
+                                torch.cat([
+                                    zgrid.reshape(nrow, 100, 100)
+                                    for zgrid in (zgrid0, zgrid1)
+                                ]),
                                 angle=90.,
                             )
                             
@@ -302,7 +311,7 @@ if __name__ == '__main__':
     assert args.num_gpus > 0 and args.num_gpus <= torch.cuda.device_count()
 
     if args.num_gpus == 1:
-        train(**{key: val for key, val in args.__dict__.items() if key != 'num_gpus'}),
+        train(**args.__dict__),
     else:
         # torch multiprocessing
         mp.spawn(

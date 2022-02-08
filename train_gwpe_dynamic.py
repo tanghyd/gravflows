@@ -725,11 +725,11 @@ if __name__ == '__main__':
 
     # training settings
     parser.add_argument('--num_gpus', type=int, default=1)
-    parser.add_argument('--lr', type=float, default=5e-4)
-    parser.add_argument('--batch_size', type=int, default=2048)
-    parser.add_argument('--epochs', type=int, default=10)
+    parser.add_argument('--lr', type=float, default=1e-3)
+    parser.add_argument('--batch_size', type=int, default=2500)
+    parser.add_argument('--epochs', type=int, default=5)
     parser.add_argument('--interval', type=int, default=2)
-    parser.add_argument('--save', type=int, default=10)
+    parser.add_argument('--save', type=int, default=0)
     parser.add_argument('--num_workers', type=int, default=6, help="Number of workers for dataloader.")
     parser.add_argument('--num_basis', type=int, default=100, help="Number of SVD reduced basis elements to use")
     parser.add_argument('--dataset', type=str, default='datasets', help="Dataset folder")
