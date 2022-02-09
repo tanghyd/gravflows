@@ -46,24 +46,37 @@ python -m gwpe.parameters \
 
 ## Noise (Power Spectral Density)
 
-# generate PSD files once
-psd_out_dir="${dataset_dir}/train/PSD/" 
-python -m gwpe.noise \
-    -d /mnt/datahole/daniel/gwosc/O1 \
-    -s gwpe/config_files/static_args.ini \
-    -o "${psd_out_dir}" \
-    --verbose \
-    --validate
+# # generate PSD files once
+# psd_out_dir="${dataset_dir}/train/PSD/" 
+# python -m gwpe.noise \
+#     -d /mnt/datahole/daniel/gwosc/O1 \
+#     -s gwpe/config_files/static_args.ini \
+#     -o "${psd_out_dir}" \
+#     --verbose \
+#     --validate
     
-# copy PSD files to other dataset partitions for completeness
-for partition in "validation" "test"
+# # copy PSD files to other dataset partitions for completeness
+# for partition in "validation" "test"
+# do
+#     for ifo in "H1" "L1"
+#     do
+#         cp -r "${dataset_dir}/train/PSD" "${dataset_dir}/${partition}"
+#     done
+
+# done
+
+# typically we would estimate a PSD via welch estimate on real strain
+# due to data location issues we include a sample PSD for testing
+# copy sample PSD to dataset partition locations
+for partition in "train" "validation" "test"
 do
     for ifo in "H1" "L1"
     do
-        cp -r "${dataset_dir}/train/PSD" "${dataset_dir}/${partition}"
+        cp -r "PSD" "${dataset_dir}/${partition}"
     done
 
 done
+
 
 ## Waveforms
 
