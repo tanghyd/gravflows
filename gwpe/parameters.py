@@ -196,7 +196,8 @@ def compute_parameter_statistics(bounds: Dict[str, pycbc.boundaries.Bounds]):
             mean = 0.0
             std = np.sqrt((np.pi**2 - 8) / 4)
 
-        statistics = statistics.append(pd.Series({'mean': mean, 'std': std}, name=param))
+        # statistics = statistics.append(pd.Series({'mean': mean, 'std': std}, name=param))
+        statistics = pd.concat([statistics, pd.Series({'mean': mean, 'std': std}, name=param).to_frame()])
 
     return statistics
 

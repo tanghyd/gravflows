@@ -1,13 +1,30 @@
-# Master of Data Science Research Project
+### ozstar module loads + virtualenv
+`module load python/3.8.5`
 
-This repository is for the research work of Daniel Tang (21140852) for work on data engineering and training of flow-based models for gravitational wave parameter estimation.
+We could replace later `pip install`s with `module load`, e.g.
 
-We have forked code written by Stephen R. Green and Jonathan Gair [arXiv:2008.03312](https://arxiv.org/abs/2008.03312) to leverage their previous work on training a neural spline flow model for gravitational wave parameter estimation.
+`module load wheel/0.37.0-python-3.8.5`
 
-We have also forked code from https://github.com/damonbeveridge/samplegen - a repository that adds additional features to the sample generation code by Timothy Gebhard and Niki Kilbertus [arXiv:1904.08693](https://arxiv.org/abs/1904.08693) for generating realistic synthetic gravitational-wave data. Our main use of this code is to leverage pre-existing code loading bit-masks and data from .hdf5 files to obtain valid gravitational wave strains as well as PyCBC config file handling.
-## Current Goals
+## Virtualenv install commands
 
-We have been investigating how to refactor the waveform generation code for potential run-time speedups using multi-threading (e.g. for I/O bound fetching open source data - concurrent multi-tasking was eventually tried rather multi-threading in Python) and multi-processing (e.g. for CPU bound simluating of waveform models given samples from our priors).
+    python -m venv <name>
+    . <name>/bin/activate
 
-Additionally, we intend to rewrite a reproducible distributed training framework with PyTorch and DataDistributedParallel (e.g. GPU bound memory constraints during training) help accelerate research and development time for training deep learning models.
+## Conda install commands
 
+    conda create --name <name> python=3.8.5 -y
+    conda activate <name>  # source activate <name> works for containers
+
+## Shared install commands
+
+Upgrade pip inside conda (or just in regular virtual environment)
+
+`python -m pip install --upgrade pip`
+
+Optional (likely will be future dependencies)
+
+`pip install wheel black pytest mypy ipykernel`
+
+Install main packages
+
+`pip install tqdm numpy scipy pandas scikit-learn matplotlib seaborn pycbc lalsuite ligo.skymap`
