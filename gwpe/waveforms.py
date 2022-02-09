@@ -31,6 +31,10 @@ from pycbc.waveform import (
     td_approximants, fd_approximants,
 )
 
+# prevent download as compute node may not have internet
+from astropy.utils import iers
+iers.conf.auto_download = False
+
 # local imports
 from .utils import read_ini_config, match_precision
 from .noise import (

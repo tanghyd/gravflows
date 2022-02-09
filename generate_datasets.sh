@@ -5,7 +5,8 @@
 # # env DATASET_DIR=/fred/oz016/datasets/ bash generate_datasets.sh
 # # then we set it to be a default path
 
-# dataset_dir=${DATASET_DIR:-"/mnt/datahole/daniel/gravflows/lfigw"}
+# dataset_dir=${DATASET_DIR:-"<PATH TO OUTPUT DATASET DIR>"}
+
 dataset_dir=${DATASET_DIR:-"data"}
 echo "Saving datasets to ${dataset_dir}/"
 
@@ -16,7 +17,7 @@ SECONDS=0
 
 # training data set
 python -m gwpe.parameters \
-    -n 1000 \
+    -n 10000 \
     -d "${dataset_dir}/train/" \
     -c gwpe/config_files/intrinsics.ini \
     --overwrite \
@@ -26,7 +27,7 @@ python -m gwpe.parameters \
 
 # validation data set
 python -m gwpe.parameters \
-    -n 100 \
+    -n 1000 \
     -d "${dataset_dir}/validation/" \
     -c gwpe/config_files/intrinsics.ini \
     -c gwpe/config_files/extrinsics.ini \
@@ -36,7 +37,7 @@ python -m gwpe.parameters \
 
 # test data set
 python -m gwpe.parameters \
-    -n 100 \
+    -n 1000 \
     -d "${dataset_dir}/test/" \
     -c gwpe/config_files/intrinsics.ini \
     -c gwpe/config_files/extrinsics.ini \
@@ -77,9 +78,7 @@ do
 
 done
 
-
 ## Waveforms
-
 # run waveform generation script for training data
 python -m gwpe.waveforms \
     -d "${dataset_dir}/train/" \
@@ -111,7 +110,7 @@ python -m gwpe.waveforms \
     --validate \
     --metadata \
     --chunk_size 5000 \
-    --workers 12
+    --workers 4
     # --add_noise \
     # --gaussian \
     # --projections_only \
@@ -132,7 +131,7 @@ python -m gwpe.waveforms \
     --validate \
     --metadata \
     --chunk_size 5000 \
-    --workers 12
+    --workers 4
     # --projections_only \
 
 # print out size of datasets

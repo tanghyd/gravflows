@@ -5,6 +5,8 @@ We could replace later `pip install`s with `module load`, e.g.
 
 `module load wheel/0.37.0-python-3.8.5`
 
+We do load wheel as above, but the rest is downloaded via pip.
+
 ## Virtualenv install commands
 
     python -m venv <name>
@@ -21,10 +23,19 @@ Upgrade pip inside conda (or just in regular virtual environment)
 
 `python -m pip install --upgrade pip`
 
-Optional (likely will be future dependencies)
-
-`pip install wheel black pytest mypy ipykernel`
-
 Install main packages
 
-`pip install tqdm numpy scipy pandas scikit-learn matplotlib seaborn pycbc lalsuite ligo.skymap`
+`pip install tqdm numpy scipy pandas scikit-learn matplotlib seaborn pycbc lalsuite ligo.skymap`  # core
+`pip install wheel black pytest mypy ipykernel`
+
+OR
+
+`pip install -r requirements.txt`
+
+## Miscellaneous notes
+
+Sometimes `astropy.utils.iers` will call something to auto-download data.
+As compute nodes have no internet access, we have disabled this in `gwpe/waveforms.py` with:
+
+    from astropy.utils import iers
+    iers.conf.auto_download = False
