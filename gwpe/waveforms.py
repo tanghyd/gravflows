@@ -345,6 +345,82 @@ def batch_project(
 
     return projections
 
+def batch_whiten(
+    timeseries: np.ndarray,
+    window: Optional[np.ndarray]=None,
+    psds: Optional[np.ndarray]=None,
+    fd_length: Optional[int]=None,
+    f_lower_idx: int=0,
+) -> np.ndarray:
+    """
+    Function returns a whitened timeseries given a timeseries array input.
+    
+    The timeseries data is windowed if a window kernel of the same size is provided. 
+    Then a np.fft.fft operation is applied in batch, followed by an optional highpass
+    filterm specified by the f_lower_idx input argument. If a PSD is supplied we whiten 
+    the waveform in the frequency domain, then ifft it back to a real-valued timeseries.
+    
+    TO DO:
+    
+    Currently we have only tested unique PSD for each IFO, but the same PSD is applied
+    to all the samples in the batch of waveforms (N). It should be simple enough to allow
+    for N potentially different PSDs or each C IFOs (C being arbitrary "channels"), which
+    would whiten a batch of waveforms for each IFO according to different noise signatures.
+    Ideally all that would be required is to change the input `psds` array.
+    
+    This could be useful for training neural networks conditional on broad PSD distributions.
+    
+    Arguments:
+        timeseries: np.ndarray
+            The real-valued timeseries array in batch, of shape [N, C, L]
+        window: np.ndarray
+            An optional windowing function to apply to the timeseries of shape [,L]
+        psds: np.ndarray
+            An frequency domain array describing the PSD for whitening, of shape [C, L]
+        fd_length: int
+            The length of the frequency domain waveform for FFT. If psds is provided, we use that shape.
+        f_lower_idx: int
+            If this is non-zero, we set indices below this value are set to 0 (highpass filter).
+            
+    Returns: np.ndarray
+        The whitened timeseries array of the same shape as the input.
+            
+    """
+    # optionally apply window
+    if window is not None:
+        assert timeseries.shape[-1] == window.shape[-1]
+        ts = timeseries * window
+    else:
+        ts = timeseries
+        
+    # specify length of arrays for fft/ifft
+    td_length = ts.shape[-1]
+    if fd_length is None and psds is not None:
+        fd_length = psds.shape[-1]
+    assert 0 <= f_lower_idx <= fd_length
+
+    # fourier transformation
+    frequencyseries = np.fft.fft(ts, axis=-1)                                     # FFT windowed timeseries
+    frequencyseries = frequencyseries[:, :, :(frequencyseries.shape[-1] // 2)]*2  # construct real component
+    frequencyseries = frequencyseries[:, :, :fd_length]                           # truncate to psd length
+
+    # apply highpass filter
+    frequencyseries[:, :, :f_lower_idx] = 0.                                      # highpass filter
+
+    # whiten non-zero elements on the waveform
+    if psds is not None:
+        assert len(psds.shape) in (2, 3), "psd must either a 2-d or 3-d numpy array"
+        assert psds.shape[-2] == frequencyseries.shape[-2], "psd and fft(timeseries) length don't match"
+        assert psds.shape[-1] == fd_length, "psds.shape[-1] does not match input fd_length"
+        if len(psds.shape) == 3:
+            frequencyseries = frequencyseries[:, :, f_lower_idx:] / (psds[:, :, f_lower_idx:]**0.5)
+        else:
+            frequencyseries = frequencyseries[:, :, f_lower_idx:] / (psds[None, :, f_lower_idx:]**0.5)
+            
+    # either of these should be fine...?
+#     return np.fft.ifft(frequencyseries, n=td_length).real * 2
+    return np.fft.irfft(frequencyseries, n=td_length)
+
 def validate_waveform(
     waveform: np.ndarray,
     static_args: Dict[str, float],
