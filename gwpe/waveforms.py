@@ -361,12 +361,12 @@ def batch_whiten(
     the waveform in the frequency domain, then ifft it back to a real-valued timeseries.
     
     TO DO:
-    
+
     Currently we have only tested unique PSD for each IFO, but the same PSD is applied
     to all the samples in the batch of waveforms (N). It should be simple enough to allow
-    for N potentially different PSDs or each C IFOs (C being arbitrary "channels"), which
-    would whiten a batch of waveforms for each IFO according to different noise signatures.
-    Ideally all that would be required is to change the input `psds` array.
+    for N potentially different PSDs for each of the C IFOs (C being arbitrary "channels"),
+    that would whiten a batch of waveforms for each IFO according to different noise signatures.
+    Ideally all that would be required is to change the psd such that psds.shape[0] = N.
     
     This could be useful for training neural networks conditional on broad PSD distributions.
     
